@@ -30,6 +30,13 @@ pub enum ArtifactClassification {
     Unknown,
 }
 
+impl ArtifactClassification {
+    #[must_use]
+    pub const fn is_exportable(self) -> bool {
+        matches!(self, Self::Required | Self::Associated | Self::Derived)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativeArtifact {
     pub role: String,
@@ -46,6 +53,35 @@ pub struct NativeSession {
     pub agent_version: Option<String>,
     pub timestamp: Option<String>,
     pub artifacts: Vec<NativeArtifact>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RewritePolicy {
+    BytePreserve,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapsuleArtifact {
+    pub logical_role: String,
+    pub install_path: PathBuf,
+    pub sha256: String,
+    pub required: bool,
+    pub rewrite_policy: RewritePolicy,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeCapsule {
+    pub schema: String,
+    pub provider: Provider,
+    pub source_version: Option<String>,
+    pub native_session_id: String,
+    pub original_cwd: Option<PathBuf>,
+    pub artifacts: Vec<CapsuleArtifact>,
+}
+
+impl NativeCapsule {
+    pub const SCHEMA: &'static str = "same-session/native-capsule/v1";
 }
 
 #[derive(Debug, Error)]

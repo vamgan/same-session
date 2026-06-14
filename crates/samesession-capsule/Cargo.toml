@@ -1,0 +1,25 @@
+[package]
+name = "samesession-capsule"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Encrypted native coding-agent session capsules for SameSession"
+keywords = ["ai", "agents", "session", "migration"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+age.workspace = true
+samesession-core = { version = "0.1.0", path = "../samesession-core" }
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true
