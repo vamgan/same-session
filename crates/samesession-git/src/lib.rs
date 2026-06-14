@@ -607,11 +607,16 @@ impl GitStore {
     fn update_ref(
         &self,
         reference: &str,
-        oid: &str,
-        old: Option<&str>,
+        new_oid: &str,
+        expected_old_oid: Option<&str>,
     ) -> Result<(), GitStoreError> {
-        let old = old.unwrap_or("0000000000000000000000000000000000000000");
-        git_output(&self.repository, &["update-ref", reference, oid, old], None)?;
+        let expected_old_oid =
+            expected_old_oid.unwrap_or("0000000000000000000000000000000000000000");
+        git_output(
+            &self.repository,
+            &["update-ref", reference, new_oid, expected_old_oid],
+            None,
+        )?;
         Ok(())
     }
 
