@@ -1,0 +1,27 @@
+[package]
+name = "samesession"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Move native coding-agent sessions between machines"
+readme = "../../README.md"
+keywords = ["ai", "agents", "session", "migration", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "samesession"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+samesession-adapter-claude = { version = "0.1.0", path = "../samesession-adapter-claude" }
+samesession-adapter-codex = { version = "0.1.0", path = "../samesession-adapter-codex" }
+samesession-core = { version = "0.1.0", path = "../samesession-core" }
+
+[lints]
+workspace = true
