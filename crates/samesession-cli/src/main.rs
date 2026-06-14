@@ -11,6 +11,7 @@ use samesession_capsule::{
     DeviceIdentity, RestorePolicy, SourceBundle, create_encrypted_with_source,
     restore_encrypted_with_policy,
 };
+use samesession_config::{ProjectConfig, create_project, load_project};
 use samesession_core::{NativeCapsule, NativeSession, SessionAdapter};
 use samesession_git::{GitStore, StoredLease};
 use samesession_workspace::{capture_source, restore_source};
@@ -28,6 +29,30 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Initialize project configuration and this device's identity.
+    Init {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long)]
+        recipient: Vec<String>,
+        #[arg(long)]
+        auto_push: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check local migration prerequisites.
+    Doctor {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Create and inspect this device's encryption identity.
     Device {
         #[command(subcommand)]
@@ -40,7 +65,7 @@ enum Command {
         #[arg(long)]
         provider: ProviderArg,
         /// One or more age X25519 recipients.
-        #[arg(long, required = true)]
+        #[arg(long)]
         recipient: Vec<String>,
         /// Optional standalone encrypted capsule output path.
         #[arg(long)]
@@ -112,7 +137,7 @@ enum Command {
         id: String,
         #[arg(long)]
         provider: ProviderArg,
-        #[arg(long, required = true)]
+        #[arg(long)]
         recipient: Vec<String>,
         #[arg(long, default_value = ".")]
         repository: PathBuf,
@@ -299,7 +324,8 @@ fn default_identity_path() -> Result<PathBuf> {
 }
 
 fn identity_path(path: Option<PathBuf>) -> Result<PathBuf> {
-    path.map_or_else(default_identity_path, Ok)
+    path.or_else(|| std::env::var_os("SAMESESSION_IDENTITY_FILE").map(PathBuf::from))
+        .map_or_else(default_identity_path, Ok)
 }
 
 fn print_device(identity: &DeviceIdentity, path: &Path, json: bool) -> Result<()> {
@@ -316,6 +342,39 @@ fn print_device(identity: &DeviceIdentity, path: &Path, json: bool) -> Result<()
         println!("{}", identity.recipient());
     }
     Ok(())
+}
+
+fn project_config(repository: Option<&Path>) -> Result<Option<ProjectConfig>> {
+    repository
+        .map(load_project)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(Into::into)
+}
+
+fn resolve_recipients(explicit: &[String], config: Option<&ProjectConfig>) -> Result<Vec<String>> {
+    let recipients = if explicit.is_empty() {
+        config
+            .map(|config| config.encryption.recipients.clone())
+            .unwrap_or_default()
+    } else {
+        explicit.to_vec()
+    };
+    if recipients.is_empty() {
+        bail!("no encryption recipients configured; run `samesession init` or pass --recipient");
+    }
+    Ok(recipients)
+}
+
+fn resolve_push<'a>(
+    explicit: Option<&'a str>,
+    config: Option<&'a ProjectConfig>,
+) -> Option<&'a str> {
+    explicit.or_else(|| {
+        config
+            .filter(|config| config.store.auto_push)
+            .map(|config| config.store.remote.as_str())
+    })
 }
 
 fn discover(provider: Option<ProviderArg>) -> Result<Vec<NativeSession>> {
@@ -345,6 +404,100 @@ fn print_sessions(sessions: &[NativeSession]) {
             session.transcript_path.display()
         );
     }
+}
+
+fn run_init(
+    repository: &Path,
+    remote: String,
+    identity: Option<PathBuf>,
+    mut recipients: Vec<String>,
+    auto_push: bool,
+    json: bool,
+) -> Result<()> {
+    GitStore::open(repository).context("repository is not a usable Git checkpoint store")?;
+    let identity_path = identity_path(identity)?;
+    let identity = if identity_path.exists() {
+        DeviceIdentity::load_private(&identity_path)?
+    } else {
+        let identity = DeviceIdentity::generate();
+        identity.save_private(&identity_path)?;
+        identity
+    };
+    recipients.push(identity.recipient());
+    recipients.sort();
+    recipients.dedup();
+    let config = ProjectConfig::new(remote, auto_push, recipients);
+    let config_path = create_project(repository, &config)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "config_path": config_path,
+                "identity_path": identity_path,
+                "device_id": identity.device_id(),
+                "recipient": identity.recipient(),
+                "config": config,
+            }))?
+        );
+    } else {
+        println!("Initialized SameSession at {}", config_path.display());
+        println!("Device recipient: {}", identity.recipient());
+    }
+    Ok(())
+}
+
+fn run_doctor(repository: &Path, identity: Option<PathBuf>, json: bool) -> Result<()> {
+    let identity_path = identity_path(identity)?;
+    let identity_ok = DeviceIdentity::load_private(&identity_path).is_ok();
+    let config = load_project(repository)?;
+    let git_version = ProcessCommand::new("git")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    let store_ok = GitStore::open(repository).is_ok();
+    let checks = serde_json::json!({
+        "git": {
+            "ok": git_version.is_some() && store_ok,
+            "version": git_version,
+            "repository": store_ok,
+        },
+        "identity": {
+            "ok": identity_ok,
+            "path": identity_path,
+        },
+        "configuration": {
+            "ok": config.is_some(),
+            "recipient_count": config.as_ref().map_or(0, |config| config.encryption.recipients.len()),
+            "remote": config.as_ref().map(|config| &config.store.remote),
+        },
+        "agents": {
+            "codex_version": detect_agent_version(ProviderArg::Codex),
+            "claude_version": detect_agent_version(ProviderArg::Claude),
+        },
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&checks)?);
+    } else {
+        println!(
+            "git\t{}\nidentity\t{}\nconfiguration\t{}\ncodex\t{}\nclaude\t{}",
+            if checks["git"]["ok"].as_bool().unwrap_or(false) {
+                "ok"
+            } else {
+                "missing"
+            },
+            if identity_ok { "ok" } else { "missing" },
+            if config.is_some() { "ok" } else { "missing" },
+            checks["agents"]["codex_version"]
+                .as_str()
+                .unwrap_or("missing"),
+            checks["agents"]["claude_version"]
+                .as_str()
+                .unwrap_or("missing"),
+        );
+    }
+    Ok(())
 }
 
 fn run_device(command: DeviceCommand) -> Result<()> {
@@ -383,6 +536,9 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
     if options.output.is_none() && options.repository.is_none() {
         bail!("checkpoint requires --output, --repository, or both");
     }
+    let config = project_config(options.repository.as_deref())?;
+    let recipients = resolve_recipients(&options.recipient, config.as_ref())?;
+    let push = resolve_push(options.push.as_deref(), config.as_ref());
     let adapter = adapter(options.provider);
     let session = adapter.inspect(&options.id).with_context(|| {
         format!(
@@ -414,14 +570,9 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
         path: &source_bundle_path,
         snapshot,
     });
-    let capsule = create_encrypted_with_source(
-        &session,
-        adapter.home(),
-        &options.recipient,
-        &capsule_path,
-        source,
-    )
-    .with_context(|| format!("failed to create checkpoint {}", capsule_path.display()))?;
+    let capsule =
+        create_encrypted_with_source(&session, adapter.home(), &recipients, &capsule_path, source)
+            .with_context(|| format!("failed to create checkpoint {}", capsule_path.display()))?;
     let stored = options
         .repository
         .as_deref()
@@ -432,7 +583,7 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
                 .unwrap_or_else(|_| "unknown".to_owned());
             let checkpoint =
                 store.append(&capsule_path, options.portable_session.as_deref(), &creator)?;
-            if let Some(remote) = options.push.as_deref() {
+            if let Some(remote) = push {
                 store.push(remote, &checkpoint.public.portable_session_id)?;
             }
             Ok::<_, anyhow::Error>(checkpoint)
@@ -607,6 +758,9 @@ struct MoveOptions {
 }
 
 fn run_move(options: MoveOptions) -> Result<()> {
+    let config = project_config(Some(&options.repository))?;
+    let recipients = resolve_recipients(&options.recipient, config.as_ref())?;
+    let push = resolve_push(options.push.as_deref(), config.as_ref());
     let identity_path = identity_path(options.identity)?;
     let identity = DeviceIdentity::load_private(&identity_path).with_context(|| {
         format!(
@@ -634,7 +788,7 @@ fn run_move(options: MoveOptions) -> Result<()> {
     create_encrypted_with_source(
         &session,
         adapter.home(),
-        &options.recipient,
+        &recipients,
         &payload,
         Some(SourceBundle {
             path: &source_bundle_path,
@@ -654,7 +808,7 @@ fn run_move(options: MoveOptions) -> Result<()> {
         options.lease_ttl,
         Some("session moved from source device"),
     )?;
-    if let Some(remote) = options.push.as_deref() {
+    if let Some(remote) = push {
         store.push(remote, &checkpoint.public.portable_session_id)?;
         store.push_lease(remote, &checkpoint.public.portable_session_id)?;
     }
@@ -937,8 +1091,21 @@ fn run_sessions(command: SessionsCommand) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    match Cli::parse().command {
+fn run_command(command: Command) -> Result<()> {
+    match command {
+        Command::Init {
+            repository,
+            remote,
+            identity,
+            recipient,
+            auto_push,
+            json,
+        } => run_init(&repository, remote, identity, recipient, auto_push, json),
+        Command::Doctor {
+            repository,
+            identity,
+            json,
+        } => run_doctor(&repository, identity, json),
         Command::Device { command } => run_device(command),
         Command::Checkpoint {
             id,
@@ -986,6 +1153,12 @@ fn main() -> Result<()> {
             remote,
             repository,
         } => run_push(&repository, &remote, &portable_session),
+        command => run_session_command(command),
+    }
+}
+
+fn run_session_command(command: Command) -> Result<()> {
+    match command {
         Command::Move {
             id,
             provider,
@@ -1033,5 +1206,10 @@ fn main() -> Result<()> {
         Command::Lease { command } => run_lease(command),
         Command::Status { json } => run_status(json),
         Command::Sessions { command } => run_sessions(command),
+        _ => unreachable!("primary commands are handled by run_command"),
     }
+}
+
+fn main() -> Result<()> {
+    run_command(Cli::parse().command)
 }

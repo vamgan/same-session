@@ -1,0 +1,22 @@
+[package]
+name = "samesession-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Project configuration for SameSession"
+keywords = ["ai", "agents", "session", "migration"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

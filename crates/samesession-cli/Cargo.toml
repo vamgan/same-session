@@ -23,6 +23,7 @@ serde_json.workspace = true
 samesession-adapter-claude = { version = "0.1.0", path = "../samesession-adapter-claude" }
 samesession-adapter-codex = { version = "0.1.0", path = "../samesession-adapter-codex" }
 samesession-capsule = { version = "0.1.0", path = "../samesession-capsule" }
+samesession-config = { version = "0.1.0", path = "../samesession-config" }
 samesession-core = { version = "0.1.0", path = "../samesession-core" }
 samesession-git = { version = "0.1.0", path = "../samesession-git" }
 samesession-workspace = { version = "0.1.0", path = "../samesession-workspace" }
