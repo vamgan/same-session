@@ -67,18 +67,21 @@ Find the provider-owned native session ID, then move it:
 
 ```bash
 samesession sessions list --provider codex
-samesession move <native-session-id> --provider codex --repository .
+samesession move current --provider codex --repository .
 ```
 
 The command prints a portable session ID such as `sss_01...`. On the
 destination, clone the same Git remote and resume it:
 
 ```bash
-samesession resume <portable-session-id> \
+samesession resume latest \
   --provider codex \
   --repository . \
   --remote origin
 ```
+
+Use an explicit native session ID or portable session ID when `current` or
+`latest` is not the intended session.
 
 Resume decrypts and installs the native session, imports the captured source
 commit into an isolated ref, creates a sibling detached worktree, acquires the

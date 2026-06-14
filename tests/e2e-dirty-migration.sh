@@ -39,7 +39,7 @@ printf '{"timestamp":"2026-06-14T12:00:00Z","type":"session_meta","payload":{"id
 
 recipient="$(CODEX_HOME="$source_codex" "$binary" device init --identity "$identity")"
 move="$(
-  CODEX_HOME="$source_codex" "$binary" move "$session" \
+  CODEX_HOME="$source_codex" "$binary" move current \
     --provider codex \
     --recipient "$recipient" \
     --repository "$source" \
@@ -49,7 +49,7 @@ move="$(
 )"
 portable="$(jq -r '.checkpoint.public.portable_session_id' <<<"$move")"
 
-CODEX_HOME="$destination_codex" "$binary" resume "$portable" \
+CODEX_HOME="$destination_codex" "$binary" resume latest \
   --provider codex \
   --repository "$destination" \
   --identity "$identity" \

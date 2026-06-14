@@ -205,6 +205,13 @@ impl GitStore {
     ///
     /// Returns an error if the revision or required tree entries are invalid.
     pub fn inspect(&self, revision: &str) -> Result<StoredCheckpoint, GitStoreError> {
+        if revision == "latest" {
+            return self
+                .list()?
+                .into_iter()
+                .next()
+                .ok_or_else(|| GitStoreError::MissingRef(revision.to_owned()));
+        }
         let oid = match self.resolve_optional(revision)? {
             Some(oid) => Some(oid),
             None if revision.starts_with("sss_") => {
@@ -903,6 +910,13 @@ mod tests {
             destination_store
                 .inspect("sss_test")
                 .expect("inspect portable session")
+                .oid,
+            first.oid
+        );
+        assert_eq!(
+            destination_store
+                .inspect("latest")
+                .expect("inspect latest")
                 .oid,
             first.oid
         );

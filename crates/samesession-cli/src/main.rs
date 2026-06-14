@@ -61,7 +61,8 @@ enum Command {
     },
     /// Create an encrypted native session capsule.
     Checkpoint {
-        /// Provider-owned native session ID.
+        /// Provider-owned native session ID or `current`.
+        #[arg(default_value = "current")]
         id: String,
         #[arg(long)]
         provider: ProviderArg,
@@ -155,6 +156,8 @@ enum Command {
     },
     /// Checkpoint a session and mark it in transit.
     Move {
+        /// Provider-owned native session ID or `current`.
+        #[arg(default_value = "current")]
         id: String,
         #[arg(long)]
         provider: ProviderArg,
@@ -175,6 +178,8 @@ enum Command {
     },
     /// Restore, acquire ownership, and optionally launch a native session.
     Resume {
+        /// Checkpoint ref, OID, portable session ID, or `latest`.
+        #[arg(default_value = "latest")]
         revision: String,
         #[arg(long)]
         provider: ProviderArg,
@@ -340,6 +345,20 @@ fn adapter(provider: ProviderArg) -> Box<dyn SessionAdapter> {
         ProviderArg::Codex => Box::new(CodexAdapter::detect()),
         ProviderArg::Claude => Box::new(ClaudeAdapter::detect()),
     }
+}
+
+fn inspect_native_session(adapter: &dyn SessionAdapter, id: &str) -> Result<NativeSession> {
+    if id == "current" {
+        return adapter
+            .discover()
+            .with_context(|| format!("failed to discover {} sessions", adapter.provider()))?
+            .into_iter()
+            .next()
+            .with_context(|| format!("no {} sessions were found", adapter.provider()));
+    }
+    adapter
+        .inspect(id)
+        .with_context(|| format!("failed to inspect {} session {id}", adapter.provider()))
 }
 
 fn default_identity_path() -> Result<PathBuf> {
@@ -595,13 +614,7 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
     let _repository_lock = repository_lock(options.repository.as_deref())?;
     let adapter = adapter(options.provider);
     let _adapter_lock = adapter_lock(adapter.as_ref())?;
-    let session = adapter.inspect(&options.id).with_context(|| {
-        format!(
-            "failed to inspect {} session {}",
-            adapter.provider(),
-            options.id
-        )
-    })?;
+    let session = inspect_native_session(adapter.as_ref(), &options.id)?;
     let temporary = tempfile::tempdir().context("failed to create checkpoint staging directory")?;
     let source_bundle_path = temporary.path().join("commits.bundle");
     let source_snapshot = options
@@ -865,13 +878,7 @@ fn run_move(options: MoveOptions) -> Result<()> {
     })?;
     let adapter = adapter(options.provider);
     let _adapter_lock = adapter_lock(adapter.as_ref())?;
-    let session = adapter.inspect(&options.id).with_context(|| {
-        format!(
-            "failed to inspect {} session {}",
-            adapter.provider(),
-            options.id
-        )
-    })?;
+    let session = inspect_native_session(adapter.as_ref(), &options.id)?;
     let temporary = tempfile::tempdir().context("failed to create move staging directory")?;
     let payload = temporary.path().join("payload.age");
     let source_bundle_path = temporary.path().join("commits.bundle");
