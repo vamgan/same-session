@@ -124,12 +124,29 @@ enum Command {
         remote: String,
         #[arg(long, default_value = ".")]
         repository: PathBuf,
+        #[arg(long)]
+        prune: bool,
     },
     /// Push one append-only checkpoint chain.
     Push {
         portable_session: String,
         #[arg(default_value = "origin")]
         remote: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+    /// Delete one checkpoint chain after exact confirmation.
+    Delete {
+        portable_session: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        confirm: String,
+    },
+    /// Run conservative Git checkpoint-store maintenance.
+    Gc {
         #[arg(long, default_value = ".")]
         repository: PathBuf,
     },
@@ -769,8 +786,33 @@ fn run_inspect(repository: &Path, revision: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_fetch(repository: &Path, remote: &str) -> Result<()> {
-    GitStore::open(repository)?.fetch(remote)?;
+fn run_fetch(repository: &Path, remote: &str, prune: bool) -> Result<()> {
+    GitStore::open(repository)?.fetch_with_prune(remote, prune)?;
+    Ok(())
+}
+
+fn run_delete(
+    repository: &Path,
+    portable_session: &str,
+    remote: Option<&str>,
+    confirm: &str,
+) -> Result<()> {
+    if confirm != portable_session {
+        bail!("--confirm must exactly match {portable_session}");
+    }
+    let _lock = repository_lock(Some(repository))?;
+    let store = GitStore::open(repository)?;
+    if let Some(remote) = remote {
+        store.delete_remote(remote, portable_session)?;
+    }
+    store.delete_local(portable_session)?;
+    println!("Deleted checkpoint chain {portable_session}");
+    Ok(())
+}
+
+fn run_gc(repository: &Path) -> Result<()> {
+    let _lock = repository_lock(Some(repository))?;
+    GitStore::open(repository)?.gc()?;
     Ok(())
 }
 
@@ -1183,12 +1225,23 @@ fn run_command(command: Command) -> Result<()> {
             repository,
             json,
         } => run_inspect(&repository, &revision, json),
-        Command::Fetch { remote, repository } => run_fetch(&repository, &remote),
+        Command::Fetch {
+            remote,
+            repository,
+            prune,
+        } => run_fetch(&repository, &remote, prune),
         Command::Push {
             portable_session,
             remote,
             repository,
         } => run_push(&repository, &remote, &portable_session),
+        Command::Delete {
+            portable_session,
+            repository,
+            remote,
+            confirm,
+        } => run_delete(&repository, &portable_session, remote.as_deref(), &confirm),
+        Command::Gc { repository } => run_gc(&repository),
         command => run_session_command(command),
     }
 }

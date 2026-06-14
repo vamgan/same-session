@@ -265,22 +265,84 @@ impl GitStore {
     ///
     /// Returns an error for an unsafe remote name or a failed Git fetch.
     pub fn fetch(&self, remote: &str) -> Result<(), GitStoreError> {
+        self.fetch_with_prune(remote, false)
+    }
+
+    /// Fetches only `SameSession` refs and optionally prunes stale fetched refs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe remote name or a failed Git fetch.
+    pub fn fetch_with_prune(&self, remote: &str, prune: bool) -> Result<(), GitStoreError> {
         validate_segment(remote)?;
         let source = format!("{PUBLISHED_PREFIX}/{}/*", self.repository_key);
         let destination = format!("{REMOTE_PREFIX}/{remote}/{}/*", self.repository_key);
         let lease_source = format!("{PUBLISHED_LEASE_PREFIX}/{}/*", self.repository_key);
         let lease_destination = format!("{REMOTE_LEASE_PREFIX}/{remote}/{}/*", self.repository_key);
+        let checkpoint_refspec = format!("+{source}:{destination}");
+        let lease_refspec = format!("+{lease_source}:{lease_destination}");
+        let mut arguments = vec!["fetch", "--no-tags"];
+        if prune {
+            arguments.push("--prune");
+        }
+        arguments.extend([remote, checkpoint_refspec.as_str(), lease_refspec.as_str()]);
+        git_output(&self.repository, &arguments, None)?;
+        Ok(())
+    }
+
+    /// Deletes local checkpoint and lease refs for one portable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe session ID or a failed ref deletion.
+    pub fn delete_local(&self, portable_session_id: &str) -> Result<(), GitStoreError> {
+        let checkpoint = self.local_ref(portable_session_id)?;
+        let lease = self.local_lease_ref(portable_session_id)?;
+        git_output(&self.repository, &["update-ref", "-d", &checkpoint], None)?;
+        git_output(&self.repository, &["update-ref", "-d", &lease], None)?;
+        Ok(())
+    }
+
+    /// Deletes published checkpoint and lease refs for one portable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe ref segments or a rejected Git push.
+    pub fn delete_remote(
+        &self,
+        remote: &str,
+        portable_session_id: &str,
+    ) -> Result<(), GitStoreError> {
+        validate_segment(remote)?;
+        validate_segment(portable_session_id)?;
+        let checkpoint = format!(
+            "{PUBLISHED_PREFIX}/{}/{}",
+            self.repository_key, portable_session_id
+        );
+        let lease = format!(
+            "{PUBLISHED_LEASE_PREFIX}/{}/{}",
+            self.repository_key, portable_session_id
+        );
         git_output(
             &self.repository,
             &[
-                "fetch",
-                "--no-tags",
+                "push",
                 remote,
-                &format!("+{source}:{destination}"),
-                &format!("+{lease_source}:{lease_destination}"),
+                &format!(":{checkpoint}"),
+                &format!(":{lease}"),
             ],
             None,
         )?;
+        Ok(())
+    }
+
+    /// Runs Git's conservative automatic object maintenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git maintenance fails.
+    pub fn gc(&self) -> Result<(), GitStoreError> {
+        git_output(&self.repository, &["gc", "--auto"], None)?;
         Ok(())
     }
 
@@ -934,6 +996,47 @@ mod tests {
                 .expect("lease")
                 .oid,
             lease.oid
+        );
+    }
+
+    #[test]
+    fn deletes_selected_local_and_remote_refs() {
+        let remote = tempdir().expect("remote");
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .current_dir(remote.path())
+            .status()
+            .expect("bare git");
+        assert!(status.success());
+        let source = init_repository();
+        let destination = init_repository();
+        add_origin(source.path(), remote.path());
+        add_origin(destination.path(), remote.path());
+        let payload = source.path().join("payload.age");
+        fs::write(&payload, b"payload").expect("payload");
+        let source_store = GitStore::open(source.path()).expect("source store");
+        let destination_store = GitStore::open(destination.path()).expect("destination store");
+        source_store
+            .append(&payload, Some("sss_test"), "source")
+            .expect("append");
+        source_store.push("origin", "sss_test").expect("push");
+        destination_store.fetch("origin").expect("fetch");
+        assert_eq!(destination_store.list().expect("list").len(), 1);
+
+        source_store
+            .delete_remote("origin", "sss_test")
+            .expect("delete remote");
+        source_store.delete_local("sss_test").expect("delete local");
+        destination_store
+            .fetch_with_prune("origin", true)
+            .expect("prune fetch");
+
+        assert!(source_store.list().expect("source list").is_empty());
+        assert!(
+            destination_store
+                .list()
+                .expect("destination list")
+                .is_empty()
         );
     }
 }
