@@ -205,9 +205,19 @@ impl GitStore {
     ///
     /// Returns an error if the revision or required tree entries are invalid.
     pub fn inspect(&self, revision: &str) -> Result<StoredCheckpoint, GitStoreError> {
-        let oid = self
-            .resolve_optional(revision)?
-            .ok_or_else(|| GitStoreError::MissingRef(revision.to_owned()))?;
+        let oid = match self.resolve_optional(revision)? {
+            Some(oid) => Some(oid),
+            None if revision.starts_with("sss_") => {
+                validate_segment(revision)?;
+                let local = self.local_ref(revision)?;
+                match self.resolve_optional(&local)? {
+                    Some(oid) => Some(oid),
+                    None => self.remote_parent(revision)?,
+                }
+            }
+            None => None,
+        }
+        .ok_or_else(|| GitStoreError::MissingRef(revision.to_owned()))?;
         self.inspect_oid(&oid, revision)
     }
 
@@ -889,6 +899,13 @@ mod tests {
         destination_store
             .fetch("origin")
             .expect("destination fetch");
+        assert_eq!(
+            destination_store
+                .inspect("sss_test")
+                .expect("inspect portable session")
+                .oid,
+            first.oid
+        );
         let second = destination_store
             .append(&destination_payload, Some("sss_test"), "destination")
             .expect("second");

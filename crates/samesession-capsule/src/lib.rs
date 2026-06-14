@@ -1091,6 +1091,8 @@ mod tests {
         let snapshot = RepositorySnapshot {
             root_hint: "repo".to_owned(),
             head_oid: "abc123".to_owned(),
+            snapshot_oid: "def456".to_owned(),
+            bundle_ref: "refs/samesession/capture/def456".to_owned(),
             head_ref: Some("main".to_owned()),
             dirty: false,
             bundle_sha256: super::hash_path(&bundle).expect("hash"),

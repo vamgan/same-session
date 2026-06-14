@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::Path,
     process::{Command, Output, Stdio},
 };
@@ -47,38 +47,77 @@ pub fn capture_source(
         fs::create_dir_all(parent)?;
     }
     let root = git_text(repository, &["rev-parse", "--show-toplevel"])?;
-    scan_tracked_files(Path::new(&root))?;
-    let head_oid = git_text(repository, &["rev-parse", "HEAD"])?;
-    let head_ref = git_optional_text(repository, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    let dirty = !git_text(
-        repository,
-        &["status", "--porcelain=v1", "--untracked-files=all"],
-    )?
-    .is_empty();
-    git_output(
-        repository,
-        &["bundle", "create", &bundle_output.to_string_lossy(), "HEAD"],
-    )?;
+    let root = Path::new(&root);
+    scan_selected_files(root)?;
+    let head_oid = git_text(root, &["rev-parse", "HEAD"])?;
+    let head_ref = git_optional_text(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let dirty = !git_text(root, &["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty();
+    let snapshot_oid = if dirty {
+        create_synthetic_commit(root)?
+    } else {
+        head_oid.clone()
+    };
+    let bundle_ref = format!("refs/samesession/capture/{snapshot_oid}");
+    git_output(root, &["update-ref", &bundle_ref, &snapshot_oid])?;
+    let bundle_result = git_output(
+        root,
+        &[
+            "bundle",
+            "create",
+            &bundle_output.to_string_lossy(),
+            &bundle_ref,
+        ],
+    );
+    let delete_result = git_output(root, &["update-ref", "-d", &bundle_ref]);
+    bundle_result?;
+    delete_result?;
     Ok(RepositorySnapshot {
-        root_hint: Path::new(&root).file_name().map_or_else(
+        root_hint: root.file_name().map_or_else(
             || "repository".to_owned(),
             |name| name.to_string_lossy().into(),
         ),
         head_oid,
+        snapshot_oid,
+        bundle_ref,
         head_ref,
         dirty,
         bundle_sha256: hash_file(bundle_output)?,
     })
 }
 
-fn scan_tracked_files(repository: &Path) -> Result<(), WorkspaceError> {
-    let output = git_output(repository, &["ls-files", "-z"])?;
+fn create_synthetic_commit(repository: &Path) -> Result<String, WorkspaceError> {
+    let directory = tempfile::tempdir()?;
+    let index = directory.path().join("index");
+    git_output_with_index(repository, &index, &["read-tree", "HEAD"])?;
+    git_output_with_index(repository, &index, &["add", "-A", "--", "."])?;
+    let tree = git_text_with_index(repository, &index, &["write-tree"])?;
+    git_text_with_input(
+        repository,
+        &["commit-tree", &tree, "-p", "HEAD"],
+        b"SameSession workspace snapshot\n",
+    )
+}
+
+fn scan_selected_files(repository: &Path) -> Result<(), WorkspaceError> {
+    let output = git_output(
+        repository,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
     for path in output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
     {
         let path = repository.join(String::from_utf8_lossy(path).as_ref());
+        if !path.exists() {
+            continue;
+        }
         if let Some(finding) = scan_path(&path)
             .map_err(|error| io::Error::other(error.to_string()))?
             .into_iter()
@@ -116,26 +155,63 @@ pub fn restore_source(
     }
     git_output(repository, &["bundle", "verify", &bundle.to_string_lossy()])?;
     let reference = format!("refs/samesession/source/{ref_segment}");
+    let bundle_ref = if snapshot.bundle_ref.is_empty() {
+        "HEAD"
+    } else {
+        &snapshot.bundle_ref
+    };
     git_output(
         repository,
         &[
             "fetch",
             &bundle.to_string_lossy(),
-            &format!("HEAD:{reference}"),
+            &format!("{bundle_ref}:{reference}"),
         ],
     )?;
     let actual = git_text(
         repository,
         &["rev-parse", "--verify", "--end-of-options", &reference],
     )?;
-    if actual != snapshot.head_oid {
+    let expected = if snapshot.snapshot_oid.is_empty() {
+        &snapshot.head_oid
+    } else {
+        &snapshot.snapshot_oid
+    };
+    if &actual != expected {
         return Err(WorkspaceError::HeadMismatch {
             reference,
             actual,
-            expected: snapshot.head_oid.clone(),
+            expected: expected.clone(),
         });
     }
     Ok(reference)
+}
+
+/// Creates a detached worktree at an imported `SameSession` source ref.
+///
+/// # Errors
+///
+/// Returns an error when the destination exists or Git cannot create the
+/// worktree.
+pub fn create_worktree(
+    repository: &Path,
+    source_ref: &str,
+    destination: &Path,
+) -> Result<(), WorkspaceError> {
+    if destination.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "worktree exists").into());
+    }
+    git_output(
+        repository,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &destination.to_string_lossy(),
+            source_ref,
+        ],
+    )?;
+    Ok(())
 }
 
 fn validate_segment(segment: &str) -> Result<(), WorkspaceError> {
@@ -178,6 +254,46 @@ fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceEr
     )
 }
 
+fn git_text_with_index(
+    repository: &Path,
+    index: &Path,
+    arguments: &[&str],
+) -> Result<String, WorkspaceError> {
+    Ok(
+        String::from_utf8_lossy(&git_output_with_index(repository, index, arguments)?.stdout)
+            .trim()
+            .to_owned(),
+    )
+}
+
+fn git_text_with_input(
+    repository: &Path,
+    arguments: &[&str],
+    input: &[u8],
+) -> Result<String, WorkspaceError> {
+    let mut child = Command::new("git")
+        .current_dir(repository)
+        .args([
+            "-c",
+            "user.name=SameSession",
+            "-c",
+            "user.email=samesession@localhost",
+        ])
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin is available")
+        .write_all(input)?;
+    let output = child.wait_with_output()?;
+    checked_output(arguments, output)
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn git_optional_text(
     repository: &Path,
     arguments: &[&str],
@@ -205,6 +321,26 @@ fn git_output(repository: &Path, arguments: &[&str]) -> Result<Output, Workspace
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()?;
+    checked_output(arguments, output)
+}
+
+fn git_output_with_index(
+    repository: &Path,
+    index: &Path,
+    arguments: &[&str],
+) -> Result<Output, WorkspaceError> {
+    let output = Command::new("git")
+        .current_dir(repository)
+        .env("GIT_INDEX_FILE", index)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    checked_output(arguments, output)
+}
+
+fn checked_output(arguments: &[&str], output: Output) -> Result<Output, WorkspaceError> {
     if !output.status.success() {
         return Err(WorkspaceError::Git {
             arguments: arguments.join(" "),
@@ -220,7 +356,17 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{WorkspaceError, capture_source, restore_source};
+    use super::{WorkspaceError, capture_source, create_worktree, restore_source};
+
+    fn git_text(path: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(path)
+            .output()
+            .expect("git command");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
 
     fn init_with_commit(path: &Path, contents: &str) {
         let status = Command::new("git")
@@ -292,5 +438,54 @@ mod tests {
             .expect_err("must reject secret");
 
         assert!(matches!(error, WorkspaceError::SecretFound { .. }));
+    }
+
+    #[test]
+    fn captures_dirty_workspace_without_mutating_source() {
+        let source = tempdir().expect("source");
+        let destination = tempdir().expect("destination");
+        let worktree_parent = tempdir().expect("worktree parent");
+        let worktree = worktree_parent.path().join("resumed");
+        init_with_commit(source.path(), "base");
+        init_with_commit(destination.path(), "destination");
+        fs::write(source.path().join("file.txt"), "modified").expect("tracked file");
+        fs::write(source.path().join("untracked.bin"), [0_u8, 1, 2, 255]).expect("untracked file");
+        let source_status = git_text(
+            source.path(),
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        );
+        let destination_head = git_text(destination.path(), &["rev-parse", "HEAD"]);
+        let bundle = worktree_parent.path().join("source.bundle");
+
+        let snapshot = capture_source(source.path(), &bundle).expect("capture");
+        let reference =
+            restore_source(destination.path(), &bundle, &snapshot, "sss_dirty").expect("restore");
+        create_worktree(destination.path(), &reference, &worktree).expect("worktree");
+
+        assert!(snapshot.dirty);
+        assert_ne!(snapshot.snapshot_oid, snapshot.head_oid);
+        assert_eq!(
+            git_text(
+                source.path(),
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            ),
+            source_status
+        );
+        assert_eq!(
+            git_text(source.path(), &["for-each-ref", "refs/samesession/capture"]),
+            ""
+        );
+        assert_eq!(
+            git_text(destination.path(), &["rev-parse", "HEAD"]),
+            destination_head
+        );
+        assert_eq!(
+            fs::read_to_string(worktree.join("file.txt")).expect("tracked"),
+            "modified"
+        );
+        assert_eq!(
+            fs::read(worktree.join("untracked.bin")).expect("untracked"),
+            [0_u8, 1, 2, 255]
+        );
     }
 }

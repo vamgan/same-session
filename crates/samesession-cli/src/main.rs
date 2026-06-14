@@ -15,7 +15,7 @@ use samesession_config::{ProjectConfig, create_project, load_project};
 use samesession_core::{NativeCapsule, NativeSession, SessionAdapter};
 use samesession_git::{GitStore, StoredLease};
 use samesession_lock::OperationLock;
-use samesession_workspace::{capture_source, restore_source};
+use samesession_workspace::{capture_source, create_worktree, restore_source};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -96,6 +96,9 @@ enum Command {
         /// Read the positional argument as a checkpoint ref or OID in this repository.
         #[arg(long)]
         repository: Option<PathBuf>,
+        /// Create a detached worktree containing the captured source state.
+        #[arg(long)]
+        into: Option<PathBuf>,
         /// Bypass provider-native version compatibility checks.
         #[arg(long)]
         force_native: bool,
@@ -181,6 +184,9 @@ enum Command {
         identity: Option<PathBuf>,
         #[arg(long)]
         remote: Option<String>,
+        /// Destination for the resumed detached worktree.
+        #[arg(long)]
+        into: Option<PathBuf>,
         #[arg(long)]
         takeover_reason: Option<String>,
         #[arg(long, default_value_t = 3_600)]
@@ -603,14 +609,6 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
         .as_deref()
         .map(|repository| capture_source(repository, &source_bundle_path))
         .transpose()?;
-    if source_snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.dirty)
-    {
-        bail!(
-            "repository has uncommitted changes; commit them before checkpointing until dirty-workspace capture is enabled"
-        );
-    }
     let capsule_path = options
         .output
         .as_deref()
@@ -671,10 +669,16 @@ fn run_restore(
     provider: ProviderArg,
     identity: Option<PathBuf>,
     repository: Option<&Path>,
+    into: Option<&Path>,
     force_native: bool,
     json: bool,
 ) -> Result<()> {
-    let restored = restore_capsule(capsule, provider, identity, repository, force_native)?;
+    if into.is_some() && repository.is_none() {
+        bail!(
+            "--into requires --repository because standalone capsules have no destination Git store"
+        );
+    }
+    let restored = restore_capsule(capsule, provider, identity, repository, into, force_native)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&restored)?);
     } else {
@@ -691,6 +695,7 @@ fn restore_capsule(
     provider: ProviderArg,
     identity: Option<PathBuf>,
     repository: Option<&Path>,
+    into: Option<&Path>,
     force_native: bool,
 ) -> Result<NativeCapsule> {
     let path = identity_path(identity)?;
@@ -728,9 +733,17 @@ fn restore_capsule(
             restored.repository.as_ref(),
             source_bundle.as_deref(),
         ) {
-            let length = 16.min(snapshot.head_oid.len());
-            let segment = format!("source_{}", &snapshot.head_oid[..length]);
-            restore_source(repository, bundle, snapshot, &segment)?;
+            let snapshot_oid = if snapshot.snapshot_oid.is_empty() {
+                &snapshot.head_oid
+            } else {
+                &snapshot.snapshot_oid
+            };
+            let length = 16.min(snapshot_oid.len());
+            let segment = format!("source_{}", &snapshot_oid[..length]);
+            let source_ref = restore_source(repository, bundle, snapshot, &segment)?;
+            if let Some(into) = into {
+                create_worktree(repository, &source_ref, into)?;
+            }
         }
         Ok(restored)
     })
@@ -858,11 +871,6 @@ fn run_move(options: MoveOptions) -> Result<()> {
     let payload = temporary.path().join("payload.age");
     let source_bundle_path = temporary.path().join("commits.bundle");
     let source_snapshot = capture_source(&options.repository, &source_bundle_path)?;
-    if source_snapshot.dirty {
-        bail!(
-            "repository has uncommitted changes; commit them before moving until dirty-workspace capture is enabled"
-        );
-    }
     create_encrypted_with_source(
         &session,
         adapter.home(),
@@ -1025,6 +1033,7 @@ struct ResumeOptions {
     repository: PathBuf,
     identity: Option<PathBuf>,
     remote: Option<String>,
+    into: Option<PathBuf>,
     takeover_reason: Option<String>,
     lease_ttl: i64,
     no_launch: bool,
@@ -1040,6 +1049,10 @@ fn run_resume(options: ResumeOptions) -> Result<()> {
         store.fetch(remote)?;
     }
     let checkpoint = store.inspect(&options.revision)?;
+    let worktree = options.into.map_or_else(
+        || default_resume_worktree(&options.repository, &checkpoint.public.portable_session_id),
+        Ok,
+    )?;
     let status = store.lease_status(&checkpoint.public.portable_session_id)?;
     let automatic_takeover = status
         .as_ref()
@@ -1060,10 +1073,11 @@ fn run_resume(options: ResumeOptions) -> Result<()> {
         options.provider,
         options.identity,
         Some(&options.repository),
+        Some(&worktree),
         options.force_native,
     )?;
     if !options.no_launch {
-        launch_native(options.provider, &restored)?;
+        launch_native(options.provider, &restored, Some(&worktree))?;
     }
     if options.json {
         println!(
@@ -1072,19 +1086,44 @@ fn run_resume(options: ResumeOptions) -> Result<()> {
                 "checkpoint": checkpoint,
                 "lease": lease,
                 "restored": restored,
+                "worktree": worktree,
                 "launched": !options.no_launch,
             }))?
         );
     } else {
         println!(
-            "Resumed {} session {}",
-            restored.provider, restored.native_session_id
+            "Resumed {} session {} in {}",
+            restored.provider,
+            restored.native_session_id,
+            worktree.display()
         );
     }
     Ok(())
 }
 
-fn launch_native(provider: ProviderArg, capsule: &NativeCapsule) -> Result<()> {
+fn default_resume_worktree(repository: &Path, portable_session_id: &str) -> Result<PathBuf> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repository)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("failed to resolve repository root")?;
+    if !output.status.success() {
+        bail!("failed to resolve repository root");
+    }
+    let repository = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let parent = repository.parent().unwrap_or_else(|| Path::new("."));
+    let root = repository
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repository");
+    Ok(parent.join(format!("{root}-samesession-{portable_session_id}")))
+}
+
+fn launch_native(
+    provider: ProviderArg,
+    capsule: &NativeCapsule,
+    cwd_override: Option<&Path>,
+) -> Result<()> {
     let mut command = match provider {
         ProviderArg::Codex => {
             let mut command = ProcessCommand::new("codex");
@@ -1097,7 +1136,10 @@ fn launch_native(provider: ProviderArg, capsule: &NativeCapsule) -> Result<()> {
             command
         }
     };
-    if let Some(cwd) = capsule.original_cwd.as_deref().filter(|cwd| cwd.is_dir()) {
+    if let Some(cwd) = cwd_override
+        .filter(|cwd| cwd.is_dir())
+        .or_else(|| capsule.original_cwd.as_deref().filter(|cwd| cwd.is_dir()))
+    {
         command.current_dir(cwd);
     }
     let status = command.status().context("failed to launch native agent")?;
@@ -1209,6 +1251,7 @@ fn run_command(command: Command) -> Result<()> {
             provider,
             identity,
             repository,
+            into,
             force_native,
             json,
         } => run_restore(
@@ -1216,6 +1259,7 @@ fn run_command(command: Command) -> Result<()> {
             provider,
             identity,
             repository.as_deref(),
+            into.as_deref(),
             force_native,
             json,
         ),
@@ -1275,6 +1319,7 @@ fn run_session_command(command: Command) -> Result<()> {
             repository,
             identity,
             remote,
+            into,
             takeover_reason,
             lease_ttl,
             no_launch,
@@ -1286,6 +1331,7 @@ fn run_session_command(command: Command) -> Result<()> {
             repository,
             identity,
             remote,
+            into,
             takeover_reason,
             lease_ttl,
             no_launch,

@@ -86,6 +86,10 @@ pub struct NativeCapsule {
 pub struct RepositorySnapshot {
     pub root_hint: String,
     pub head_oid: String,
+    #[serde(default)]
+    pub snapshot_oid: String,
+    #[serde(default)]
+    pub bundle_ref: String,
     pub head_ref: Option<String>,
     pub dirty: bool,
     pub bundle_sha256: String,
