@@ -5,6 +5,7 @@ members = [
   "crates/samesession-capsule",
   "crates/samesession-cli",
   "crates/samesession-core",
+  "crates/samesession-git",
 ]
 resolver = "2"
 
@@ -27,6 +28,8 @@ sha2 = "0.11.0"
 tar = { version = "0.4.46", default-features = false }
 tempfile = "3.23"
 thiserror = "2.0"
+time = { version = "=0.3.44", features = ["formatting"] }
+ulid = "1.2.1"
 walkdir = "2.5"
 zstd = "0.13.3"
 

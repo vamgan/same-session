@@ -24,6 +24,8 @@ samesession-adapter-claude = { version = "0.1.0", path = "../samesession-adapter
 samesession-adapter-codex = { version = "0.1.0", path = "../samesession-adapter-codex" }
 samesession-capsule = { version = "0.1.0", path = "../samesession-capsule" }
 samesession-core = { version = "0.1.0", path = "../samesession-core" }
+samesession-git = { version = "0.1.0", path = "../samesession-git" }
+tempfile.workspace = true
 
 [lints]
 workspace = true

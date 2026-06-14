@@ -1,0 +1,25 @@
+[package]
+name = "samesession-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Git checkpoint transport for SameSession"
+keywords = ["ai", "agents", "session", "migration", "git"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true
