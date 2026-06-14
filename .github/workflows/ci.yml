@@ -22,3 +22,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo build --workspace --locked
+
+  release-readiness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify crate package contents
+        shell: bash
+        run: |
+          while read -r package; do
+            cargo package --locked --allow-dirty --no-verify --list -p "${package}" >/dev/null
+          done < <(cargo metadata --format-version 1 --no-deps | jq -r '.packages[].name')
