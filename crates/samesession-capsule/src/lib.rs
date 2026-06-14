@@ -10,6 +10,7 @@ use age::{Decryptor, Encryptor, x25519};
 use samesession_core::{
     ArtifactClassification, CapsuleArtifact, NativeCapsule, NativeSession, Provider, RewritePolicy,
 };
+use semver::Version;
 use sha2::{Digest, Sha256};
 use tar::{Archive, Builder, EntryType, Header};
 use thiserror::Error;
@@ -54,6 +55,13 @@ pub enum CapsuleError {
         expected: Provider,
         actual: Provider,
     },
+    #[error(
+        "native session version {source_version} is incompatible with destination version {destination_version}"
+    )]
+    IncompatibleVersion {
+        source_version: String,
+        destination_version: String,
+    },
     #[error("invalid age identity")]
     InvalidIdentity,
     #[error("invalid age recipient")]
@@ -73,6 +81,13 @@ pub enum CapsuleError {
 #[derive(Clone)]
 pub struct DeviceIdentity {
     identity: x25519::Identity,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RestorePolicy<'a> {
+    pub expected_provider: Provider,
+    pub destination_version: Option<&'a str>,
+    pub force_native: bool,
 }
 
 impl DeviceIdentity {
@@ -226,6 +241,30 @@ pub fn restore_encrypted(
     destination_home: &Path,
     expected_provider: Provider,
 ) -> Result<NativeCapsule, CapsuleError> {
+    restore_encrypted_with_policy(
+        input,
+        identity,
+        destination_home,
+        RestorePolicy {
+            expected_provider,
+            destination_version: None,
+            force_native: false,
+        },
+    )
+}
+
+/// Decrypts, verifies, checks compatibility, and installs a native session.
+///
+/// # Errors
+///
+/// Returns an error when decryption, archive validation, compatibility checks,
+/// hash verification, or installation fails.
+pub fn restore_encrypted_with_policy(
+    input: &Path,
+    identity: &DeviceIdentity,
+    destination_home: &Path,
+    policy: RestorePolicy<'_>,
+) -> Result<NativeCapsule, CapsuleError> {
     let file = File::open(input)?;
     let decryptor = Decryptor::new_buffered(BufReader::new(file))?;
     let reader = decryptor.decrypt(std::iter::once(&identity.identity as &dyn age::Identity))?;
@@ -235,12 +274,7 @@ pub fn restore_encrypted(
     let staging = tempfile::Builder::new()
         .prefix(".samesession-restore-")
         .tempdir_in(destination_home)?;
-    restore_archive(
-        &mut archive,
-        staging.path(),
-        destination_home,
-        expected_provider,
-    )
+    restore_archive(&mut archive, staging.path(), destination_home, policy)
 }
 
 fn collect_artifacts(
@@ -444,7 +478,7 @@ fn restore_archive<R: Read>(
     archive: &mut Archive<R>,
     staging: &Path,
     destination_home: &Path,
-    expected_provider: Provider,
+    policy: RestorePolicy<'_>,
 ) -> Result<NativeCapsule, CapsuleError> {
     let mut seen = BTreeSet::new();
     let mut manifest = None;
@@ -489,14 +523,49 @@ fn restore_archive<R: Read>(
     if capsule.schema != NativeCapsule::SCHEMA {
         return Err(CapsuleError::UnsupportedSchema(capsule.schema));
     }
-    if capsule.provider != expected_provider {
+    if capsule.provider != policy.expected_provider {
         return Err(CapsuleError::ProviderMismatch {
-            expected: expected_provider,
+            expected: policy.expected_provider,
             actual: capsule.provider,
         });
     }
+    check_version_compatibility(&capsule, policy)?;
     verify_and_install(&capsule, staging, destination_home)?;
     Ok(capsule)
+}
+
+fn check_version_compatibility(
+    capsule: &NativeCapsule,
+    policy: RestorePolicy<'_>,
+) -> Result<(), CapsuleError> {
+    let (Some(source), Some(destination)) = (
+        capsule.source_version.as_deref(),
+        policy.destination_version,
+    ) else {
+        return Ok(());
+    };
+    if policy.force_native || compatible_versions(source, destination) {
+        return Ok(());
+    }
+    Err(CapsuleError::IncompatibleVersion {
+        source_version: source.to_owned(),
+        destination_version: destination.to_owned(),
+    })
+}
+
+fn compatible_versions(source: &str, destination: &str) -> bool {
+    match (parse_version(source), parse_version(destination)) {
+        (Some(source), Some(destination)) => {
+            source.major == destination.major && source.minor == destination.minor
+        }
+        _ => source.trim() == destination.trim(),
+    }
+}
+
+fn parse_version(value: &str) -> Option<Version> {
+    value
+        .split_whitespace()
+        .find_map(|part| Version::parse(part.trim_start_matches('v')).ok())
 }
 
 fn verify_and_install(
@@ -653,7 +722,10 @@ mod tests {
     use samesession_core::{ArtifactClassification, NativeArtifact, NativeSession, Provider};
     use tempfile::tempdir;
 
-    use super::{CapsuleError, DeviceIdentity, create_encrypted, restore_encrypted};
+    use super::{
+        CapsuleError, DeviceIdentity, RestorePolicy, create_encrypted, restore_encrypted,
+        restore_encrypted_with_policy,
+    };
 
     fn session(path: &Path, classification: ArtifactClassification) -> NativeSession {
         NativeSession {
@@ -790,6 +862,41 @@ mod tests {
         .expect_err("must reject provider mismatch");
 
         assert!(matches!(error, CapsuleError::ProviderMismatch { .. }));
+        assert!(!destination.path().join("sessions/session.jsonl").exists());
+    }
+
+    #[test]
+    fn refuses_incompatible_native_version_before_installing() {
+        let source = tempdir().expect("source");
+        let destination = tempdir().expect("destination");
+        let transcript = source.path().join("sessions/session.jsonl");
+        fs::create_dir_all(transcript.parent().expect("parent")).expect("sessions");
+        fs::write(&transcript, "{}").expect("artifact");
+        let identity = DeviceIdentity::generate();
+        let capsule = source.path().join("session.age");
+        let mut native_session = session(&transcript, ArtifactClassification::Required);
+        native_session.agent_version = Some("1.2.3".to_owned());
+        create_encrypted(
+            &native_session,
+            source.path(),
+            &[identity.recipient()],
+            &capsule,
+        )
+        .expect("create");
+
+        let error = restore_encrypted_with_policy(
+            &capsule,
+            &identity,
+            destination.path(),
+            RestorePolicy {
+                expected_provider: Provider::Codex,
+                destination_version: Some("codex-cli 1.3.0"),
+                force_native: false,
+            },
+        )
+        .expect_err("must reject incompatible version");
+
+        assert!(matches!(error, CapsuleError::IncompatibleVersion { .. }));
         assert!(!destination.path().join("sessions/session.jsonl").exists());
     }
 

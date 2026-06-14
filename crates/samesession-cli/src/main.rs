@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use samesession_adapter_claude::ClaudeAdapter;
 use samesession_adapter_codex::CodexAdapter;
-use samesession_capsule::{DeviceIdentity, create_encrypted, restore_encrypted};
+use samesession_capsule::{
+    DeviceIdentity, RestorePolicy, create_encrypted, restore_encrypted_with_policy,
+};
 use samesession_core::{NativeCapsule, NativeSession, SessionAdapter};
 use samesession_git::{GitStore, StoredLease};
 
@@ -66,6 +68,9 @@ enum Command {
         /// Read the positional argument as a checkpoint ref or OID in this repository.
         #[arg(long)]
         repository: Option<PathBuf>,
+        /// Bypass provider-native version compatibility checks.
+        #[arg(long)]
+        force_native: bool,
         /// Emit stable JSON output.
         #[arg(long)]
         json: bool,
@@ -137,6 +142,9 @@ enum Command {
         lease_ttl: i64,
         #[arg(long)]
         no_launch: bool,
+        /// Bypass provider-native version compatibility checks.
+        #[arg(long)]
+        force_native: bool,
         #[arg(long)]
         json: bool,
     },
@@ -437,9 +445,10 @@ fn run_restore(
     provider: ProviderArg,
     identity: Option<PathBuf>,
     repository: Option<&Path>,
+    force_native: bool,
     json: bool,
 ) -> Result<()> {
-    let restored = restore_capsule(capsule, provider, identity, repository)?;
+    let restored = restore_capsule(capsule, provider, identity, repository, force_native)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&restored)?);
     } else {
@@ -456,6 +465,7 @@ fn restore_capsule(
     provider: ProviderArg,
     identity: Option<PathBuf>,
     repository: Option<&Path>,
+    force_native: bool,
 ) -> Result<NativeCapsule> {
     let path = identity_path(identity)?;
     let identity = DeviceIdentity::load_private(&path)
@@ -470,8 +480,33 @@ fn restore_capsule(
             Ok::<_, anyhow::Error>(extracted)
         },
     )?;
-    restore_encrypted(&capsule_path, &identity, adapter.home(), adapter.provider())
-        .with_context(|| format!("failed to restore checkpoint {}", capsule.display()))
+    let destination_version = detect_agent_version(provider);
+    restore_encrypted_with_policy(
+        &capsule_path,
+        &identity,
+        adapter.home(),
+        RestorePolicy {
+            expected_provider: adapter.provider(),
+            destination_version: destination_version.as_deref(),
+            force_native,
+        },
+    )
+    .with_context(|| format!("failed to restore checkpoint {}", capsule.display()))
+}
+
+fn detect_agent_version(provider: ProviderArg) -> Option<String> {
+    let executable = match provider {
+        ProviderArg::Codex => "codex",
+        ProviderArg::Claude => "claude",
+    };
+    let output = ProcessCommand::new(executable)
+        .arg("--version")
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn run_list(repository: &Path, json: bool) -> Result<()> {
@@ -705,6 +740,7 @@ struct ResumeOptions {
     takeover_reason: Option<String>,
     lease_ttl: i64,
     no_launch: bool,
+    force_native: bool,
     json: bool,
 }
 
@@ -736,6 +772,7 @@ fn run_resume(options: ResumeOptions) -> Result<()> {
         options.provider,
         options.identity,
         Some(&options.repository),
+        options.force_native,
     )?;
     if !options.no_launch {
         launch_native(options.provider, &restored)?;
@@ -871,8 +908,16 @@ fn main() -> Result<()> {
             provider,
             identity,
             repository,
+            force_native,
             json,
-        } => run_restore(&capsule, provider, identity, repository.as_deref(), json),
+        } => run_restore(
+            &capsule,
+            provider,
+            identity,
+            repository.as_deref(),
+            force_native,
+            json,
+        ),
         Command::List { repository, json } => run_list(&repository, json),
         Command::Inspect {
             revision,
@@ -915,6 +960,7 @@ fn main() -> Result<()> {
             takeover_reason,
             lease_ttl,
             no_launch,
+            force_native,
             json,
         } => run_resume(ResumeOptions {
             revision,
@@ -925,6 +971,7 @@ fn main() -> Result<()> {
             takeover_reason,
             lease_ttl,
             no_launch,
+            force_native,
             json,
         }),
         Command::Lease { command } => run_lease(command),
