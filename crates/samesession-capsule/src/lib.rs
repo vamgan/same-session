@@ -89,6 +89,17 @@ impl DeviceIdentity {
     }
 
     #[must_use]
+    pub fn device_id(&self) -> String {
+        let digest = Sha256::digest(self.recipient().as_bytes());
+        let mut encoded = String::from("device_");
+        for byte in &digest[..8] {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+        }
+        encoded
+    }
+
+    #[must_use]
     pub fn expose_secret(&self) -> String {
         age::secrecy::ExposeSecret::expose_secret(&self.identity.to_string()).to_owned()
     }

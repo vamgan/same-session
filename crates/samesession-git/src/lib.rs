@@ -16,6 +16,9 @@ const VERSION: &[u8] = b"1\n";
 const LOCAL_PREFIX: &str = "refs/samesession/local";
 const REMOTE_PREFIX: &str = "refs/samesession/remotes";
 const PUBLISHED_PREFIX: &str = "refs/heads/same-session/v1";
+const LOCAL_LEASE_PREFIX: &str = "refs/samesession/leases/local";
+const REMOTE_LEASE_PREFIX: &str = "refs/samesession/leases/remotes";
+const PUBLISHED_LEASE_PREFIX: &str = "refs/heads/same-session-leases/v1";
 
 #[derive(Debug, Error)]
 pub enum GitStoreError {
@@ -31,6 +34,10 @@ pub enum GitStoreError {
     PayloadHashMismatch,
     #[error("fetched checkpoint refs disagree for portable session {0}")]
     DivergentRemoteRefs(String),
+    #[error("session lease is held by {holder} until {expires_at}")]
+    LeaseHeld { holder: String, expires_at: String },
+    #[error("lease TTL must be greater than zero")]
+    InvalidLeaseTtl,
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("checkpoint JSON failed: {0}")]
@@ -56,6 +63,26 @@ pub struct StoredCheckpoint {
     pub oid: String,
     pub reference: String,
     pub public: PublicCheckpoint,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LeaseRecord {
+    pub protocol: String,
+    pub portable_session_id: String,
+    pub holder_device_id: String,
+    pub source_checkpoint: String,
+    pub acquired_at: String,
+    pub expires_at: String,
+    pub takeover_reason: Option<String>,
+    #[serde(default)]
+    pub released: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredLease {
+    pub oid: String,
+    pub reference: String,
+    pub lease: LeaseRecord,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +268,8 @@ impl GitStore {
         validate_segment(remote)?;
         let source = format!("{PUBLISHED_PREFIX}/{}/*", self.repository_key);
         let destination = format!("{REMOTE_PREFIX}/{remote}/{}/*", self.repository_key);
+        let lease_source = format!("{PUBLISHED_LEASE_PREFIX}/{}/*", self.repository_key);
+        let lease_destination = format!("{REMOTE_LEASE_PREFIX}/{remote}/{}/*", self.repository_key);
         git_output(
             &self.repository,
             &[
@@ -248,7 +277,168 @@ impl GitStore {
                 "--no-tags",
                 remote,
                 &format!("+{source}:{destination}"),
+                &format!("+{lease_source}:{lease_destination}"),
             ],
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Acquires or renews an advisory append-only session lease.
+    ///
+    /// An active lease owned by a different device requires a non-empty
+    /// takeover reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe IDs, invalid lease state, an active
+    /// conflicting lease, or a failed compare-and-swap ref update.
+    pub fn acquire_lease(
+        &self,
+        portable_session_id: &str,
+        holder_device_id: &str,
+        source_checkpoint: &str,
+        ttl_seconds: i64,
+        takeover_reason: Option<&str>,
+    ) -> Result<StoredLease, GitStoreError> {
+        validate_segment(portable_session_id)?;
+        validate_segment(holder_device_id)?;
+        if ttl_seconds <= 0 {
+            return Err(GitStoreError::InvalidLeaseTtl);
+        }
+        let reference = self.local_lease_ref(portable_session_id)?;
+        let local_parent = self.resolve_optional(&reference)?;
+        let parent = match &local_parent {
+            Some(parent) => Some(parent.clone()),
+            None => self.remote_lease_parent(portable_session_id)?,
+        };
+        let now = OffsetDateTime::now_utc();
+        if let Some(parent) = &parent {
+            let current = self.inspect_lease_oid(parent, &reference)?;
+            let expiry = OffsetDateTime::parse(&current.lease.expires_at, &Rfc3339)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let conflicting = expiry > now && current.lease.holder_device_id != holder_device_id;
+            if conflicting && takeover_reason.is_none_or(str::is_empty) {
+                return Err(GitStoreError::LeaseHeld {
+                    holder: current.lease.holder_device_id,
+                    expires_at: current.lease.expires_at,
+                });
+            }
+        }
+        let lease = LeaseRecord {
+            protocol: PROTOCOL.to_owned(),
+            portable_session_id: portable_session_id.to_owned(),
+            holder_device_id: holder_device_id.to_owned(),
+            source_checkpoint: source_checkpoint.to_owned(),
+            acquired_at: now.format(&Rfc3339)?,
+            expires_at: (now + time::Duration::seconds(ttl_seconds)).format(&Rfc3339)?,
+            takeover_reason: takeover_reason.map(str::to_owned),
+            released: false,
+        };
+        let version_oid = self.hash_blob(VERSION)?;
+        let lease_oid = self.hash_blob(&serde_json::to_vec_pretty(&lease)?)?;
+        let tree = self.make_tree(&[("version", &version_oid), ("lease.json", &lease_oid)])?;
+        let oid = self.commit_tree(&tree, parent.as_deref(), "SameSession lease")?;
+        self.update_ref(&reference, &oid, local_parent.as_deref())?;
+        Ok(StoredLease {
+            oid,
+            reference,
+            lease,
+        })
+    }
+
+    /// Reads the latest known lease for a portable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when local and fetched lease refs disagree or a lease
+    /// commit is malformed.
+    pub fn lease_status(
+        &self,
+        portable_session_id: &str,
+    ) -> Result<Option<StoredLease>, GitStoreError> {
+        validate_segment(portable_session_id)?;
+        let local = self.local_lease_ref(portable_session_id)?;
+        if let Some(oid) = self.resolve_optional(&local)? {
+            return self.inspect_lease_oid(&oid, &local).map(Some);
+        }
+        self.remote_lease_parent(portable_session_id)?
+            .map(|oid| self.inspect_lease_oid(&oid, "fetched-remote"))
+            .transpose()
+    }
+
+    /// Releases a lease owned by the specified device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no lease exists, another device owns the active
+    /// lease, or the append-only release record cannot be written.
+    pub fn release_lease(
+        &self,
+        portable_session_id: &str,
+        holder_device_id: &str,
+    ) -> Result<StoredLease, GitStoreError> {
+        validate_segment(portable_session_id)?;
+        validate_segment(holder_device_id)?;
+        let reference = self.local_lease_ref(portable_session_id)?;
+        let local_parent = self.resolve_optional(&reference)?;
+        let parent = match &local_parent {
+            Some(parent) => parent.clone(),
+            None => self
+                .remote_lease_parent(portable_session_id)?
+                .ok_or_else(|| GitStoreError::MissingRef(portable_session_id.to_owned()))?,
+        };
+        let current = self.inspect_lease_oid(&parent, &reference)?;
+        let now = OffsetDateTime::now_utc();
+        let expiry = OffsetDateTime::parse(&current.lease.expires_at, &Rfc3339)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if expiry > now
+            && !current.lease.released
+            && current.lease.holder_device_id != holder_device_id
+        {
+            return Err(GitStoreError::LeaseHeld {
+                holder: current.lease.holder_device_id,
+                expires_at: current.lease.expires_at,
+            });
+        }
+        let lease = LeaseRecord {
+            protocol: PROTOCOL.to_owned(),
+            portable_session_id: portable_session_id.to_owned(),
+            holder_device_id: holder_device_id.to_owned(),
+            source_checkpoint: current.lease.source_checkpoint,
+            acquired_at: now.format(&Rfc3339)?,
+            expires_at: now.format(&Rfc3339)?,
+            takeover_reason: Some("released".to_owned()),
+            released: true,
+        };
+        let version_oid = self.hash_blob(VERSION)?;
+        let lease_oid = self.hash_blob(&serde_json::to_vec_pretty(&lease)?)?;
+        let tree = self.make_tree(&[("version", &version_oid), ("lease.json", &lease_oid)])?;
+        let oid = self.commit_tree(&tree, Some(&parent), "SameSession lease release")?;
+        self.update_ref(&reference, &oid, local_parent.as_deref())?;
+        Ok(StoredLease {
+            oid,
+            reference,
+            lease,
+        })
+    }
+
+    /// Pushes one lease chain with an explicit refspec.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe ref segments or a rejected Git push.
+    pub fn push_lease(&self, remote: &str, portable_session_id: &str) -> Result<(), GitStoreError> {
+        validate_segment(remote)?;
+        validate_segment(portable_session_id)?;
+        let source = self.local_lease_ref(portable_session_id)?;
+        let destination = format!(
+            "{PUBLISHED_LEASE_PREFIX}/{}/{}",
+            self.repository_key, portable_session_id
+        );
+        git_output(
+            &self.repository,
+            &["push", remote, &format!("{source}:{destination}")],
             None,
         )?;
         Ok(())
@@ -258,6 +448,14 @@ impl GitStore {
         validate_segment(portable_session_id)?;
         Ok(format!(
             "{LOCAL_PREFIX}/{}/{}",
+            self.repository_key, portable_session_id
+        ))
+    }
+
+    fn local_lease_ref(&self, portable_session_id: &str) -> Result<String, GitStoreError> {
+        validate_segment(portable_session_id)?;
+        Ok(format!(
+            "{LOCAL_LEASE_PREFIX}/{}/{}",
             self.repository_key, portable_session_id
         ))
     }
@@ -278,22 +476,22 @@ impl GitStore {
                 REMOTE_PREFIX,
             ],
         )?;
-        let suffix = format!("/{}/{portable_session_id}", self.repository_key);
-        let mut matches = refs
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .filter(|(_, reference)| reference.ends_with(&suffix))
-            .map(|(oid, _)| oid.to_owned())
-            .collect::<Vec<_>>();
-        matches.sort();
-        matches.dedup();
-        match matches.as_slice() {
-            [] => Ok(None),
-            [oid] => Ok(Some(oid.clone())),
-            _ => Err(GitStoreError::DivergentRemoteRefs(
-                portable_session_id.to_owned(),
-            )),
-        }
+        unique_remote_tip(&refs, &self.repository_key, portable_session_id)
+    }
+
+    fn remote_lease_parent(
+        &self,
+        portable_session_id: &str,
+    ) -> Result<Option<String>, GitStoreError> {
+        let refs = git_text(
+            &self.repository,
+            &[
+                "for-each-ref",
+                "--format=%(objectname) %(refname)",
+                REMOTE_LEASE_PREFIX,
+            ],
+        )?;
+        unique_remote_tip(&refs, &self.repository_key, portable_session_id)
     }
 
     fn hash_blob(&self, bytes: &[u8]) -> Result<String, GitStoreError> {
@@ -361,8 +559,52 @@ impl GitStore {
         })
     }
 
+    fn inspect_lease_oid(&self, oid: &str, reference: &str) -> Result<StoredLease, GitStoreError> {
+        let version = self.show_blob(&format!("{oid}:version"))?;
+        if version != VERSION {
+            return Err(GitStoreError::MissingTreeEntry(
+                "supported version".to_owned(),
+            ));
+        }
+        let lease: LeaseRecord =
+            serde_json::from_slice(&self.show_blob(&format!("{oid}:lease.json"))?)?;
+        if lease.protocol != PROTOCOL {
+            return Err(GitStoreError::MissingTreeEntry(
+                "supported lease protocol".to_owned(),
+            ));
+        }
+        Ok(StoredLease {
+            oid: oid.to_owned(),
+            reference: reference.to_owned(),
+            lease,
+        })
+    }
+
     fn show_blob(&self, revision: &str) -> Result<Vec<u8>, GitStoreError> {
         Ok(git_output(&self.repository, &["show", revision], None)?.stdout)
+    }
+}
+
+fn unique_remote_tip(
+    refs: &str,
+    repository_key: &str,
+    portable_session_id: &str,
+) -> Result<Option<String>, GitStoreError> {
+    let suffix = format!("/{repository_key}/{portable_session_id}");
+    let mut matches = refs
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(_, reference)| reference.ends_with(&suffix))
+        .map(|(oid, _)| oid.to_owned())
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [oid] => Ok(Some(oid.clone())),
+        _ => Err(GitStoreError::DivergentRemoteRefs(
+            portable_session_id.to_owned(),
+        )),
     }
 }
 
@@ -606,5 +848,92 @@ mod tests {
         .expect("parents");
         assert_eq!(remote_tip.oid, second.oid);
         assert_eq!(parents, format!("{} {}", second.oid, first.oid));
+    }
+
+    #[test]
+    fn lease_blocks_other_device_without_takeover_reason() {
+        let repository = init_repository();
+        let store = GitStore::open(repository.path()).expect("store");
+        let first = store
+            .acquire_lease("sss_test", "device_one", "checkpoint", 3600, None)
+            .expect("first lease");
+
+        let error = store
+            .acquire_lease("sss_test", "device_two", "checkpoint", 3600, None)
+            .expect_err("must block");
+        let takeover = store
+            .acquire_lease(
+                "sss_test",
+                "device_two",
+                "checkpoint",
+                3600,
+                Some("source unavailable"),
+            )
+            .expect("takeover");
+
+        assert!(matches!(error, GitStoreError::LeaseHeld { .. }));
+        assert_eq!(
+            store.lease_status("sss_test").expect("status"),
+            Some(takeover.clone())
+        );
+        let parents = super::git_text(
+            repository.path(),
+            &["rev-list", "--parents", "-1", &takeover.oid],
+        )
+        .expect("parents");
+        assert_eq!(parents, format!("{} {}", takeover.oid, first.oid));
+    }
+
+    #[test]
+    fn lease_owner_can_release_for_another_device() {
+        let repository = init_repository();
+        let store = GitStore::open(repository.path()).expect("store");
+        store
+            .acquire_lease("sss_test", "device_one", "checkpoint", 3600, None)
+            .expect("lease");
+
+        let released = store
+            .release_lease("sss_test", "device_one")
+            .expect("release");
+        let acquired = store
+            .acquire_lease("sss_test", "device_two", "checkpoint", 3600, None)
+            .expect("new lease");
+
+        assert!(released.lease.released);
+        assert_eq!(acquired.lease.holder_device_id, "device_two");
+    }
+
+    #[test]
+    fn pushes_and_fetches_lease_refs() {
+        let remote = tempdir().expect("remote");
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .current_dir(remote.path())
+            .status()
+            .expect("bare git");
+        assert!(status.success());
+        let source = init_repository();
+        let destination = init_repository();
+        add_origin(source.path(), remote.path());
+        add_origin(destination.path(), remote.path());
+        let source_store = GitStore::open(source.path()).expect("source store");
+        let destination_store = GitStore::open(destination.path()).expect("destination store");
+        let lease = source_store
+            .acquire_lease("sss_test", "device_one", "checkpoint", 3600, None)
+            .expect("lease");
+        source_store
+            .push_lease("origin", "sss_test")
+            .expect("push lease");
+
+        destination_store.fetch("origin").expect("fetch");
+
+        assert_eq!(
+            destination_store
+                .lease_status("sss_test")
+                .expect("status")
+                .expect("lease")
+                .oid,
+            lease.oid
+        );
     }
 }

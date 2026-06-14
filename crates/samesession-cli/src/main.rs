@@ -1,12 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use samesession_adapter_claude::ClaudeAdapter;
 use samesession_adapter_codex::CodexAdapter;
 use samesession_capsule::{DeviceIdentity, create_encrypted, restore_encrypted};
-use samesession_core::{NativeSession, SessionAdapter};
-use samesession_git::GitStore;
+use samesession_core::{NativeCapsule, NativeSession, SessionAdapter};
+use samesession_git::{GitStore, StoredLease};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -97,6 +100,51 @@ enum Command {
         #[arg(long, default_value = ".")]
         repository: PathBuf,
     },
+    /// Checkpoint a session and mark it in transit.
+    Move {
+        id: String,
+        #[arg(long)]
+        provider: ProviderArg,
+        #[arg(long, required = true)]
+        recipient: Vec<String>,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        portable_session: Option<String>,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long)]
+        push: Option<String>,
+        #[arg(long, default_value_t = 86_400)]
+        lease_ttl: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore, acquire ownership, and optionally launch a native session.
+    Resume {
+        revision: String,
+        #[arg(long)]
+        provider: ProviderArg,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        takeover_reason: Option<String>,
+        #[arg(long, default_value_t = 3_600)]
+        lease_ttl: i64,
+        #[arg(long)]
+        no_launch: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect and manage advisory session ownership.
+    Lease {
+        #[command(subcommand)]
+        command: LeaseCommand,
+    },
     /// Show detected agent homes and native session counts.
     Status {
         /// Emit stable JSON output.
@@ -127,6 +175,66 @@ enum DeviceCommand {
         #[arg(long)]
         identity: Option<PathBuf>,
         /// Emit stable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LeaseCommand {
+    /// Show the latest known lease.
+    Status {
+        portable_session: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Acquire, renew, or explicitly take over a lease.
+    Acquire {
+        portable_session: String,
+        #[arg(long)]
+        source_checkpoint: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long, default_value_t = 3_600)]
+        ttl: i64,
+        #[arg(long)]
+        takeover_reason: Option<String>,
+        #[arg(long)]
+        push: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take over a lease and record the required reason.
+    Takeover {
+        portable_session: String,
+        #[arg(long)]
+        source_checkpoint: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long, default_value_t = 3_600)]
+        ttl: i64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        push: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Release a lease owned by this device.
+    Release {
+        portable_session: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        identity: Option<PathBuf>,
+        #[arg(long)]
+        push: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -190,6 +298,7 @@ fn print_device(identity: &DeviceIdentity, path: &Path, json: bool) -> Result<()
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "identity_path": path,
+                "device_id": identity.device_id(),
                 "recipient": identity.recipient(),
             }))?
         );
@@ -330,6 +439,24 @@ fn run_restore(
     repository: Option<&Path>,
     json: bool,
 ) -> Result<()> {
+    let restored = restore_capsule(capsule, provider, identity, repository)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&restored)?);
+    } else {
+        println!(
+            "Restored native {} session {}",
+            restored.provider, restored.native_session_id
+        );
+    }
+    Ok(())
+}
+
+fn restore_capsule(
+    capsule: &Path,
+    provider: ProviderArg,
+    identity: Option<PathBuf>,
+    repository: Option<&Path>,
+) -> Result<NativeCapsule> {
     let path = identity_path(identity)?;
     let identity = DeviceIdentity::load_private(&path)
         .with_context(|| format!("failed to load private identity at {}", path.display()))?;
@@ -343,19 +470,8 @@ fn run_restore(
             Ok::<_, anyhow::Error>(extracted)
         },
     )?;
-    let restored = restore_encrypted(&capsule_path, &identity, adapter.home(), adapter.provider())
-        .with_context(|| format!("failed to restore checkpoint {}", capsule.display()))?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&restored)?);
-    } else {
-        println!(
-            "Restored native {} session {} into {}",
-            restored.provider,
-            restored.native_session_id,
-            adapter.home().display()
-        );
-    }
-    Ok(())
+    restore_encrypted(&capsule_path, &identity, adapter.home(), adapter.provider())
+        .with_context(|| format!("failed to restore checkpoint {}", capsule.display()))
 }
 
 fn run_list(repository: &Path, json: bool) -> Result<()> {
@@ -400,6 +516,269 @@ fn run_fetch(repository: &Path, remote: &str) -> Result<()> {
 
 fn run_push(repository: &Path, remote: &str, portable_session: &str) -> Result<()> {
     GitStore::open(repository)?.push(remote, portable_session)?;
+    Ok(())
+}
+
+struct MoveOptions {
+    id: String,
+    provider: ProviderArg,
+    recipient: Vec<String>,
+    repository: PathBuf,
+    portable_session: Option<String>,
+    identity: Option<PathBuf>,
+    push: Option<String>,
+    lease_ttl: i64,
+    json: bool,
+}
+
+fn run_move(options: MoveOptions) -> Result<()> {
+    let identity_path = identity_path(options.identity)?;
+    let identity = DeviceIdentity::load_private(&identity_path).with_context(|| {
+        format!(
+            "failed to load private identity at {}",
+            identity_path.display()
+        )
+    })?;
+    let adapter = adapter(options.provider);
+    let session = adapter.inspect(&options.id).with_context(|| {
+        format!(
+            "failed to inspect {} session {}",
+            adapter.provider(),
+            options.id
+        )
+    })?;
+    let temporary = tempfile::tempdir().context("failed to create move staging directory")?;
+    let payload = temporary.path().join("payload.age");
+    create_encrypted(&session, adapter.home(), &options.recipient, &payload)?;
+    let store = GitStore::open(&options.repository)?;
+    let checkpoint = store.append(
+        &payload,
+        options.portable_session.as_deref(),
+        &identity.device_id(),
+    )?;
+    let lease = store.acquire_lease(
+        &checkpoint.public.portable_session_id,
+        "in_transit",
+        &checkpoint.oid,
+        options.lease_ttl,
+        Some("session moved from source device"),
+    )?;
+    if let Some(remote) = options.push.as_deref() {
+        store.push(remote, &checkpoint.public.portable_session_id)?;
+        store.push_lease(remote, &checkpoint.public.portable_session_id)?;
+    }
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "checkpoint": checkpoint,
+                "lease": lease,
+            }))?
+        );
+    } else {
+        println!(
+            "Moved checkpoint {} as {}",
+            checkpoint.public.checkpoint_id, checkpoint.public.portable_session_id
+        );
+    }
+    Ok(())
+}
+
+fn print_lease(lease: Option<&StoredLease>, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&lease)?);
+    } else if let Some(lease) = lease {
+        println!(
+            "{}\t{}\t{}\t{}",
+            lease.lease.portable_session_id,
+            lease.lease.holder_device_id,
+            lease.lease.expires_at,
+            lease.lease.source_checkpoint
+        );
+    } else {
+        println!("No lease found");
+    }
+    Ok(())
+}
+
+struct LeaseAcquireOptions {
+    portable_session: String,
+    source_checkpoint: String,
+    repository: PathBuf,
+    identity: Option<PathBuf>,
+    ttl: i64,
+    takeover_reason: Option<String>,
+    push: Option<String>,
+    json: bool,
+}
+
+fn run_lease_acquire(options: LeaseAcquireOptions) -> Result<()> {
+    let path = identity_path(options.identity)?;
+    let identity = DeviceIdentity::load_private(&path)?;
+    let store = GitStore::open(options.repository)?;
+    let lease = store.acquire_lease(
+        &options.portable_session,
+        &identity.device_id(),
+        &options.source_checkpoint,
+        options.ttl,
+        options.takeover_reason.as_deref(),
+    )?;
+    if let Some(remote) = options.push {
+        store.push_lease(&remote, &options.portable_session)?;
+    }
+    print_lease(Some(&lease), options.json)
+}
+
+fn run_lease(command: LeaseCommand) -> Result<()> {
+    match command {
+        LeaseCommand::Status {
+            portable_session,
+            repository,
+            json,
+        } => {
+            let lease = GitStore::open(repository)?.lease_status(&portable_session)?;
+            print_lease(lease.as_ref(), json)
+        }
+        LeaseCommand::Acquire {
+            portable_session,
+            source_checkpoint,
+            repository,
+            identity,
+            ttl,
+            takeover_reason,
+            push,
+            json,
+        } => run_lease_acquire(LeaseAcquireOptions {
+            portable_session,
+            source_checkpoint,
+            repository,
+            identity,
+            ttl,
+            takeover_reason,
+            push,
+            json,
+        }),
+        LeaseCommand::Takeover {
+            portable_session,
+            source_checkpoint,
+            repository,
+            identity,
+            ttl,
+            reason,
+            push,
+            json,
+        } => run_lease_acquire(LeaseAcquireOptions {
+            portable_session,
+            source_checkpoint,
+            repository,
+            identity,
+            ttl,
+            takeover_reason: Some(reason),
+            push,
+            json,
+        }),
+        LeaseCommand::Release {
+            portable_session,
+            repository,
+            identity,
+            push,
+            json,
+        } => {
+            let path = identity_path(identity)?;
+            let identity = DeviceIdentity::load_private(&path)?;
+            let store = GitStore::open(repository)?;
+            let lease = store.release_lease(&portable_session, &identity.device_id())?;
+            if let Some(remote) = push {
+                store.push_lease(&remote, &portable_session)?;
+            }
+            print_lease(Some(&lease), json)
+        }
+    }
+}
+
+struct ResumeOptions {
+    revision: String,
+    provider: ProviderArg,
+    repository: PathBuf,
+    identity: Option<PathBuf>,
+    remote: Option<String>,
+    takeover_reason: Option<String>,
+    lease_ttl: i64,
+    no_launch: bool,
+    json: bool,
+}
+
+fn run_resume(options: ResumeOptions) -> Result<()> {
+    let path = identity_path(options.identity.clone())?;
+    let identity = DeviceIdentity::load_private(&path)?;
+    let store = GitStore::open(&options.repository)?;
+    if let Some(remote) = options.remote.as_deref() {
+        store.fetch(remote)?;
+    }
+    let checkpoint = store.inspect(&options.revision)?;
+    let status = store.lease_status(&checkpoint.public.portable_session_id)?;
+    let automatic_takeover = status
+        .as_ref()
+        .filter(|lease| lease.lease.holder_device_id == "in_transit")
+        .map(|_| "claim moved session");
+    let lease = store.acquire_lease(
+        &checkpoint.public.portable_session_id,
+        &identity.device_id(),
+        &checkpoint.oid,
+        options.lease_ttl,
+        options.takeover_reason.as_deref().or(automatic_takeover),
+    )?;
+    if let Some(remote) = options.remote.as_deref() {
+        store.push_lease(remote, &checkpoint.public.portable_session_id)?;
+    }
+    let restored = restore_capsule(
+        Path::new(&options.revision),
+        options.provider,
+        options.identity,
+        Some(&options.repository),
+    )?;
+    if !options.no_launch {
+        launch_native(options.provider, &restored)?;
+    }
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "checkpoint": checkpoint,
+                "lease": lease,
+                "restored": restored,
+                "launched": !options.no_launch,
+            }))?
+        );
+    } else {
+        println!(
+            "Resumed {} session {}",
+            restored.provider, restored.native_session_id
+        );
+    }
+    Ok(())
+}
+
+fn launch_native(provider: ProviderArg, capsule: &NativeCapsule) -> Result<()> {
+    let mut command = match provider {
+        ProviderArg::Codex => {
+            let mut command = ProcessCommand::new("codex");
+            command.args(["resume", &capsule.native_session_id]);
+            command
+        }
+        ProviderArg::Claude => {
+            let mut command = ProcessCommand::new("claude");
+            command.args(["--resume", &capsule.native_session_id]);
+            command
+        }
+    };
+    if let Some(cwd) = capsule.original_cwd.as_deref().filter(|cwd| cwd.is_dir()) {
+        command.current_dir(cwd);
+    }
+    let status = command.status().context("failed to launch native agent")?;
+    if !status.success() {
+        bail!("native agent exited with status {status}");
+    }
     Ok(())
 }
 
@@ -506,6 +885,49 @@ fn main() -> Result<()> {
             remote,
             repository,
         } => run_push(&repository, &remote, &portable_session),
+        Command::Move {
+            id,
+            provider,
+            recipient,
+            repository,
+            portable_session,
+            identity,
+            push,
+            lease_ttl,
+            json,
+        } => run_move(MoveOptions {
+            id,
+            provider,
+            recipient,
+            repository,
+            portable_session,
+            identity,
+            push,
+            lease_ttl,
+            json,
+        }),
+        Command::Resume {
+            revision,
+            provider,
+            repository,
+            identity,
+            remote,
+            takeover_reason,
+            lease_ttl,
+            no_launch,
+            json,
+        } => run_resume(ResumeOptions {
+            revision,
+            provider,
+            repository,
+            identity,
+            remote,
+            takeover_reason,
+            lease_ttl,
+            no_launch,
+            json,
+        }),
+        Command::Lease { command } => run_lease(command),
         Command::Status { json } => run_status(json),
         Command::Sessions { command } => run_sessions(command),
     }
