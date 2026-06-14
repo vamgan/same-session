@@ -272,10 +272,10 @@ fn verify_capture_stable(
             return Err(CapsuleError::ArtifactChanged(pending.source.clone()));
         }
     }
-    if let Some(source) = source {
-        if hash_path(source.path)? != source.snapshot.bundle_sha256 {
-            return Err(CapsuleError::ArtifactChanged(source.path.to_path_buf()));
-        }
+    if let Some(source) = source
+        && hash_path(source.path)? != source.snapshot.bundle_sha256
+    {
+        return Err(CapsuleError::ArtifactChanged(source.path.to_path_buf()));
     }
     Ok(())
 }
