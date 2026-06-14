@@ -36,3 +36,15 @@ jobs:
           while read -r package; do
             cargo package --locked --allow-dirty --no-verify --list -p "${package}" >/dev/null
           done < <(cargo metadata --format-version 1 --no-deps | jq -r '.packages[].name')
+
+  e2e:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+      - run: tests/e2e-dirty-migration.sh
