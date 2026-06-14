@@ -38,7 +38,7 @@ impl OperationLock {
             .truncate(false)
             .open(path)?;
         file.try_lock_exclusive().map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
+            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
                 LockError::Busy(path.to_path_buf())
             } else {
                 LockError::Io(error)
