@@ -11,6 +11,7 @@ use samesession_core::{
     ArtifactClassification, CapsuleArtifact, NativeCapsule, NativeSession, Provider,
     RepositorySnapshot, RewritePolicy,
 };
+use samesession_policy::{FindingKind, scan_path};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use tar::{Archive, Builder, EntryType, Header};
@@ -51,6 +52,8 @@ pub enum CapsuleError {
     OutputExists(PathBuf),
     #[error("capsule source bundle is missing")]
     MissingSourceBundle,
+    #[error("blocked secret finding {kind:?} in {path}")]
+    SecretFound { path: PathBuf, kind: FindingKind },
     #[error("{path} exceeds the {limit}-byte capsule limit")]
     SizeLimit { path: PathBuf, limit: u64 },
     #[error("capsule provider {actual} does not match expected provider {expected}")]
@@ -323,6 +326,16 @@ fn collect_artifacts(
             });
         }
         let source = artifact.path.canonicalize()?;
+        if let Some(finding) = scan_path(&source)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .into_iter()
+            .next()
+        {
+            return Err(CapsuleError::SecretFound {
+                path: finding.path,
+                kind: finding.kind,
+            });
+        }
         let install_path = source
             .strip_prefix(&provider_home)
             .map_err(|_| CapsuleError::OutsideProviderHome {
@@ -869,6 +882,25 @@ mod tests {
         .expect_err("must reject unsafe artifact");
 
         assert!(matches!(error, CapsuleError::ForbiddenArtifact { .. }));
+    }
+
+    #[test]
+    fn rejects_high_confidence_secret_in_transcript() {
+        let source = tempdir().expect("source");
+        let transcript = source.path().join("sessions/session.jsonl");
+        fs::create_dir_all(transcript.parent().expect("parent")).expect("sessions");
+        fs::write(&transcript, "token=ghp_abcdefghijklmnopqrstuvwxyz1234").expect("artifact");
+        let identity = DeviceIdentity::generate();
+
+        let error = create_encrypted(
+            &session(&transcript, ArtifactClassification::Required),
+            source.path(),
+            &[identity.recipient()],
+            &source.path().join("session.age"),
+        )
+        .expect_err("must reject secret");
+
+        assert!(matches!(error, CapsuleError::SecretFound { .. }));
     }
 
     #[test]

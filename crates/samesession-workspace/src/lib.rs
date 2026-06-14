@@ -6,6 +6,7 @@ use std::{
 };
 
 use samesession_core::RepositorySnapshot;
+use samesession_policy::{FindingKind, scan_path};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -21,6 +22,8 @@ pub enum WorkspaceError {
     },
     #[error("invalid source ref segment: {0}")]
     InvalidRefSegment(String),
+    #[error("blocked secret finding {kind:?} in {path}")]
+    SecretFound { path: String, kind: FindingKind },
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
 }
@@ -44,6 +47,7 @@ pub fn capture_source(
         fs::create_dir_all(parent)?;
     }
     let root = git_text(repository, &["rev-parse", "--show-toplevel"])?;
+    scan_tracked_files(Path::new(&root))?;
     let head_oid = git_text(repository, &["rev-parse", "HEAD"])?;
     let head_ref = git_optional_text(repository, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     let dirty = !git_text(
@@ -65,6 +69,28 @@ pub fn capture_source(
         dirty,
         bundle_sha256: hash_file(bundle_output)?,
     })
+}
+
+fn scan_tracked_files(repository: &Path) -> Result<(), WorkspaceError> {
+    let output = git_output(repository, &["ls-files", "-z"])?;
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = repository.join(String::from_utf8_lossy(path).as_ref());
+        if let Some(finding) = scan_path(&path)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .into_iter()
+            .next()
+        {
+            return Err(WorkspaceError::SecretFound {
+                path: finding.path.display().to_string(),
+                kind: finding.kind,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Imports a source bundle into an isolated local ref.
@@ -194,7 +220,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{capture_source, restore_source};
+    use super::{WorkspaceError, capture_source, restore_source};
 
     fn init_with_commit(path: &Path, contents: &str) {
         let status = Command::new("git")
@@ -255,5 +281,16 @@ mod tests {
             super::git_text(destination.path(), &["rev-parse", &reference]).expect("source ref"),
             snapshot.head_oid
         );
+    }
+
+    #[test]
+    fn blocks_secret_in_tracked_source_file() {
+        let source = tempdir().expect("source");
+        init_with_commit(source.path(), "token=ghp_abcdefghijklmnopqrstuvwxyz1234");
+
+        let error = capture_source(source.path(), &source.path().join("source.bundle"))
+            .expect_err("must reject secret");
+
+        assert!(matches!(error, WorkspaceError::SecretFound { .. }));
     }
 }

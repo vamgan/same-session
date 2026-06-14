@@ -7,6 +7,7 @@ members = [
   "crates/samesession-config",
   "crates/samesession-core",
   "crates/samesession-git",
+  "crates/samesession-policy",
   "crates/samesession-workspace",
 ]
 resolver = "2"
