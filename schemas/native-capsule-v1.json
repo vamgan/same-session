@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vamgan/same-session/schemas/native-capsule-v1.json",
+  "title": "SameSession native capsule manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "provider", "source_version", "native_session_id", "original_cwd", "artifacts", "repository"],
+  "properties": {
+    "schema": { "const": "same-session/native-capsule/v1" },
+    "provider": { "enum": ["codex", "claude-code"] },
+    "source_version": { "type": ["string", "null"] },
+    "native_session_id": { "type": "string", "minLength": 1 },
+    "original_cwd": { "type": ["string", "null"] },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "repository": {
+      "oneOf": [
+        { "$ref": "#/$defs/repository" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_role", "install_path", "sha256", "required", "rewrite_policy"],
+      "properties": {
+        "logical_role": { "type": "string", "minLength": 1 },
+        "install_path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "required": { "type": "boolean" },
+        "rewrite_policy": { "const": "byte-preserve" }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_hint", "head_oid", "snapshot_oid", "bundle_ref", "head_ref", "dirty", "bundle_sha256"],
+      "properties": {
+        "root_hint": { "type": "string", "minLength": 1 },
+        "head_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "snapshot_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "bundle_ref": { "type": "string", "pattern": "^refs/samesession/capture/[0-9a-f]{40,64}$" },
+        "head_ref": { "type": ["string", "null"] },
+        "dirty": { "type": "boolean" },
+        "bundle_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

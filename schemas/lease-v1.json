@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vamgan/same-session/schemas/lease-v1.json",
+  "title": "SameSession advisory lease v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "portable_session_id", "holder_device_id", "source_checkpoint", "acquired_at", "expires_at", "takeover_reason", "released"],
+  "properties": {
+    "protocol": { "const": "same-session/v1" },
+    "portable_session_id": { "type": "string", "pattern": "^sss_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "holder_device_id": { "type": "string", "minLength": 1 },
+    "source_checkpoint": { "type": "string", "minLength": 1 },
+    "acquired_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "takeover_reason": { "type": ["string", "null"] },
+    "released": { "type": "boolean" }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vamgan/same-session/schemas/public-checkpoint-v1.json",
+  "title": "SameSession public checkpoint metadata v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "checkpoint_id", "portable_session_id", "created_at", "creator", "cipher", "payload_sha256", "payload_bytes"],
+  "properties": {
+    "protocol": { "const": "same-session/v1" },
+    "checkpoint_id": { "type": "string", "pattern": "^ssc_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "portable_session_id": { "type": "string", "pattern": "^sss_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "creator": { "type": "string", "minLength": 1 },
+    "cipher": { "const": "age" },
+    "payload_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "payload_bytes": { "type": "integer", "minimum": 1 }
+  }
+}
