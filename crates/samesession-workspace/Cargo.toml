@@ -1,0 +1,22 @@
+[package]
+name = "samesession-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Source repository capture and restore for SameSession"
+keywords = ["ai", "agents", "session", "migration", "git"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+samesession-core = { version = "0.1.0", path = "../samesession-core" }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

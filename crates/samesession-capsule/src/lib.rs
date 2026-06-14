@@ -8,7 +8,8 @@ use std::{
 
 use age::{Decryptor, Encryptor, x25519};
 use samesession_core::{
-    ArtifactClassification, CapsuleArtifact, NativeCapsule, NativeSession, Provider, RewritePolicy,
+    ArtifactClassification, CapsuleArtifact, NativeCapsule, NativeSession, Provider,
+    RepositorySnapshot, RewritePolicy,
 };
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -48,6 +49,8 @@ pub enum CapsuleError {
     DestinationExists(PathBuf),
     #[error("checkpoint output already exists: {0}")]
     OutputExists(PathBuf),
+    #[error("capsule source bundle is missing")]
+    MissingSourceBundle,
     #[error("{path} exceeds the {limit}-byte capsule limit")]
     SizeLimit { path: PathBuf, limit: u64 },
     #[error("capsule provider {actual} does not match expected provider {expected}")]
@@ -88,6 +91,13 @@ pub struct RestorePolicy<'a> {
     pub expected_provider: Provider,
     pub destination_version: Option<&'a str>,
     pub force_native: bool,
+    pub source_bundle_output: Option<&'a Path>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SourceBundle<'a> {
+    pub path: &'a Path,
+    pub snapshot: &'a RepositorySnapshot,
 }
 
 impl DeviceIdentity {
@@ -185,6 +195,22 @@ pub fn create_encrypted(
     recipients: &[String],
     output: &Path,
 ) -> Result<NativeCapsule, CapsuleError> {
+    create_encrypted_with_source(session, provider_home, recipients, output, None)
+}
+
+/// Creates an encrypted native session capsule with an optional source bundle.
+///
+/// # Errors
+///
+/// Returns an error when native or source artifacts fail policy, packaging, or
+/// encryption.
+pub fn create_encrypted_with_source(
+    session: &NativeSession,
+    provider_home: &Path,
+    recipients: &[String],
+    output: &Path,
+    source: Option<SourceBundle<'_>>,
+) -> Result<NativeCapsule, CapsuleError> {
     let recipients = recipients
         .iter()
         .map(|recipient| {
@@ -192,7 +218,7 @@ pub fn create_encrypted(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let pending = collect_artifacts(session, provider_home)?;
-    let capsule = build_manifest(session, &pending)?;
+    let capsule = build_manifest(session, &pending, source)?;
 
     if output.exists() {
         return Err(CapsuleError::OutputExists(output.to_path_buf()));
@@ -217,6 +243,9 @@ pub fn create_encrypted(
     )?;
     for (index, artifact) in pending.iter().enumerate() {
         append_artifact(&mut tar, index, artifact)?;
+    }
+    if let Some(source) = source {
+        append_file(&mut tar, Path::new("source/commits.bundle"), source.path)?;
     }
     let zstd_writer = tar.into_inner()?;
     let age_writer = zstd_writer.finish()?;
@@ -249,6 +278,7 @@ pub fn restore_encrypted(
             expected_provider,
             destination_version: None,
             force_native: false,
+            source_bundle_output: None,
         },
     )
 }
@@ -359,6 +389,7 @@ fn path_size(path: &Path) -> Result<u64, CapsuleError> {
 fn build_manifest(
     session: &NativeSession,
     artifacts: &[PendingArtifact],
+    source: Option<SourceBundle<'_>>,
 ) -> Result<NativeCapsule, CapsuleError> {
     let mut manifest_artifacts = Vec::new();
     for artifact in artifacts {
@@ -377,6 +408,7 @@ fn build_manifest(
         native_session_id: session.id.clone(),
         original_cwd: session.cwd.clone(),
         artifacts: manifest_artifacts,
+        repository: source.map(|source| source.snapshot.clone()),
     })
 }
 
@@ -530,8 +562,55 @@ fn restore_archive<R: Read>(
         });
     }
     check_version_compatibility(&capsule, policy)?;
+    verify_source_bundle(&capsule, staging)?;
+    preflight_source_output(&capsule, policy.source_bundle_output)?;
     verify_and_install(&capsule, staging, destination_home)?;
+    copy_source_bundle(&capsule, staging, policy.source_bundle_output)?;
     Ok(capsule)
+}
+
+fn verify_source_bundle(capsule: &NativeCapsule, staging: &Path) -> Result<(), CapsuleError> {
+    let Some(repository) = &capsule.repository else {
+        return Ok(());
+    };
+    let bundle = staging.join("source/commits.bundle");
+    if !bundle.is_file() {
+        return Err(CapsuleError::MissingSourceBundle);
+    }
+    if hash_path(&bundle)? != repository.bundle_sha256 {
+        return Err(CapsuleError::HashMismatch(PathBuf::from(
+            "source/commits.bundle",
+        )));
+    }
+    Ok(())
+}
+
+fn preflight_source_output(
+    capsule: &NativeCapsule,
+    output: Option<&Path>,
+) -> Result<(), CapsuleError> {
+    let (Some(_), Some(output)) = (&capsule.repository, output) else {
+        return Ok(());
+    };
+    if output.exists() {
+        return Err(CapsuleError::DestinationExists(output.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn copy_source_bundle(
+    capsule: &NativeCapsule,
+    staging: &Path,
+    output: Option<&Path>,
+) -> Result<(), CapsuleError> {
+    let (Some(_), Some(output)) = (&capsule.repository, output) else {
+        return Ok(());
+    };
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(staging.join("source/commits.bundle"), output)?;
+    Ok(())
 }
 
 fn check_version_compatibility(
@@ -719,12 +798,14 @@ fn validate_relative(path: &Path) -> Result<(), CapsuleError> {
 mod tests {
     use std::fs;
 
-    use samesession_core::{ArtifactClassification, NativeArtifact, NativeSession, Provider};
+    use samesession_core::{
+        ArtifactClassification, NativeArtifact, NativeSession, Provider, RepositorySnapshot,
+    };
     use tempfile::tempdir;
 
     use super::{
-        CapsuleError, DeviceIdentity, RestorePolicy, create_encrypted, restore_encrypted,
-        restore_encrypted_with_policy,
+        CapsuleError, DeviceIdentity, RestorePolicy, SourceBundle, create_encrypted,
+        create_encrypted_with_source, restore_encrypted, restore_encrypted_with_policy,
     };
 
     fn session(path: &Path, classification: ArtifactClassification) -> NativeSession {
@@ -892,6 +973,7 @@ mod tests {
                 expected_provider: Provider::Codex,
                 destination_version: Some("codex-cli 1.3.0"),
                 force_native: false,
+                source_bundle_output: None,
             },
         )
         .expect_err("must reject incompatible version");
@@ -962,6 +1044,57 @@ mod tests {
         assert_eq!(
             fs::metadata(path).expect("metadata").permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn encrypted_round_trip_preserves_source_bundle() {
+        let source = tempdir().expect("source");
+        let destination = tempdir().expect("destination");
+        let transcript = source.path().join("sessions/session.jsonl");
+        let bundle = source.path().join("commits.bundle");
+        let restored_bundle = destination.path().join("commits.bundle");
+        fs::create_dir_all(transcript.parent().expect("parent")).expect("sessions");
+        fs::write(&transcript, "{}").expect("transcript");
+        fs::write(&bundle, b"git bundle bytes").expect("bundle");
+        let identity = DeviceIdentity::generate();
+        let capsule = source.path().join("session.age");
+        let snapshot = RepositorySnapshot {
+            root_hint: "repo".to_owned(),
+            head_oid: "abc123".to_owned(),
+            head_ref: Some("main".to_owned()),
+            dirty: false,
+            bundle_sha256: super::hash_path(&bundle).expect("hash"),
+        };
+        create_encrypted_with_source(
+            &session(&transcript, ArtifactClassification::Required),
+            source.path(),
+            &[identity.recipient()],
+            &capsule,
+            Some(SourceBundle {
+                path: &bundle,
+                snapshot: &snapshot,
+            }),
+        )
+        .expect("create");
+
+        let restored = restore_encrypted_with_policy(
+            &capsule,
+            &identity,
+            destination.path(),
+            RestorePolicy {
+                expected_provider: Provider::Codex,
+                destination_version: None,
+                force_native: false,
+                source_bundle_output: Some(&restored_bundle),
+            },
+        )
+        .expect("restore");
+
+        assert_eq!(restored.repository, Some(snapshot));
+        assert_eq!(
+            fs::read(restored_bundle).expect("restored bundle"),
+            b"git bundle bytes"
         );
     }
 }

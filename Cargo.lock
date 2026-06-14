@@ -1283,6 +1283,7 @@ dependencies = [
  "samesession-capsule",
  "samesession-core",
  "samesession-git",
+ "samesession-workspace",
  "serde_json",
  "tempfile",
 ]
@@ -1345,6 +1346,16 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "ulid",
+]
+
+[[package]]
+name = "samesession-workspace"
+version = "0.1.0"
+dependencies = [
+ "samesession-core",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -8,10 +8,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use samesession_adapter_claude::ClaudeAdapter;
 use samesession_adapter_codex::CodexAdapter;
 use samesession_capsule::{
-    DeviceIdentity, RestorePolicy, create_encrypted, restore_encrypted_with_policy,
+    DeviceIdentity, RestorePolicy, SourceBundle, create_encrypted_with_source,
+    restore_encrypted_with_policy,
 };
 use samesession_core::{NativeCapsule, NativeSession, SessionAdapter};
 use samesession_git::{GitStore, StoredLease};
+use samesession_workspace::{capture_source, restore_source};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -390,12 +392,36 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
         )
     })?;
     let temporary = tempfile::tempdir().context("failed to create checkpoint staging directory")?;
+    let source_bundle_path = temporary.path().join("commits.bundle");
+    let source_snapshot = options
+        .repository
+        .as_deref()
+        .map(|repository| capture_source(repository, &source_bundle_path))
+        .transpose()?;
+    if source_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.dirty)
+    {
+        bail!(
+            "repository has uncommitted changes; commit them before checkpointing until dirty-workspace capture is enabled"
+        );
+    }
     let capsule_path = options
         .output
         .as_deref()
         .map_or_else(|| temporary.path().join("payload.age"), Path::to_path_buf);
-    let capsule = create_encrypted(&session, adapter.home(), &options.recipient, &capsule_path)
-        .with_context(|| format!("failed to create checkpoint {}", capsule_path.display()))?;
+    let source = source_snapshot.as_ref().map(|snapshot| SourceBundle {
+        path: &source_bundle_path,
+        snapshot,
+    });
+    let capsule = create_encrypted_with_source(
+        &session,
+        adapter.home(),
+        &options.recipient,
+        &capsule_path,
+        source,
+    )
+    .with_context(|| format!("failed to create checkpoint {}", capsule_path.display()))?;
     let stored = options
         .repository
         .as_deref()
@@ -472,6 +498,7 @@ fn restore_capsule(
         .with_context(|| format!("failed to load private identity at {}", path.display()))?;
     let adapter = adapter(provider);
     let temporary = tempfile::tempdir().context("failed to create restore staging directory")?;
+    let source_bundle = repository.map(|_| temporary.path().join("commits.bundle"));
     let capsule_path = repository.map_or_else(
         || Ok(capsule.to_path_buf()),
         |repository| {
@@ -489,9 +516,22 @@ fn restore_capsule(
             expected_provider: adapter.provider(),
             destination_version: destination_version.as_deref(),
             force_native,
+            source_bundle_output: source_bundle.as_deref(),
         },
     )
     .with_context(|| format!("failed to restore checkpoint {}", capsule.display()))
+    .and_then(|restored| {
+        if let (Some(repository), Some(snapshot), Some(bundle)) = (
+            repository,
+            restored.repository.as_ref(),
+            source_bundle.as_deref(),
+        ) {
+            let length = 16.min(snapshot.head_oid.len());
+            let segment = format!("source_{}", &snapshot.head_oid[..length]);
+            restore_source(repository, bundle, snapshot, &segment)?;
+        }
+        Ok(restored)
+    })
 }
 
 fn detect_agent_version(provider: ProviderArg) -> Option<String> {
@@ -584,7 +624,23 @@ fn run_move(options: MoveOptions) -> Result<()> {
     })?;
     let temporary = tempfile::tempdir().context("failed to create move staging directory")?;
     let payload = temporary.path().join("payload.age");
-    create_encrypted(&session, adapter.home(), &options.recipient, &payload)?;
+    let source_bundle_path = temporary.path().join("commits.bundle");
+    let source_snapshot = capture_source(&options.repository, &source_bundle_path)?;
+    if source_snapshot.dirty {
+        bail!(
+            "repository has uncommitted changes; commit them before moving until dirty-workspace capture is enabled"
+        );
+    }
+    create_encrypted_with_source(
+        &session,
+        adapter.home(),
+        &options.recipient,
+        &payload,
+        Some(SourceBundle {
+            path: &source_bundle_path,
+            snapshot: &source_snapshot,
+        }),
+    )?;
     let store = GitStore::open(&options.repository)?;
     let checkpoint = store.append(
         &payload,

@@ -78,6 +78,17 @@ pub struct NativeCapsule {
     pub native_session_id: String,
     pub original_cwd: Option<PathBuf>,
     pub artifacts: Vec<CapsuleArtifact>,
+    #[serde(default)]
+    pub repository: Option<RepositorySnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepositorySnapshot {
+    pub root_hint: String,
+    pub head_oid: String,
+    pub head_ref: Option<String>,
+    pub dirty: bool,
+    pub bundle_sha256: String,
 }
 
 impl NativeCapsule {

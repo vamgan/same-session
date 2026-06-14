@@ -25,6 +25,7 @@ samesession-adapter-codex = { version = "0.1.0", path = "../samesession-adapter-
 samesession-capsule = { version = "0.1.0", path = "../samesession-capsule" }
 samesession-core = { version = "0.1.0", path = "../samesession-core" }
 samesession-git = { version = "0.1.0", path = "../samesession-git" }
+samesession-workspace = { version = "0.1.0", path = "../samesession-workspace" }
 tempfile.workspace = true
 
 [lints]
