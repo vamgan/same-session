@@ -698,6 +698,11 @@ fn restore_capsule(
     into: Option<&Path>,
     force_native: bool,
 ) -> Result<NativeCapsule> {
+    if let Some(into) = into
+        && into.exists()
+    {
+        bail!("destination worktree already exists: {}", into.display());
+    }
     let path = identity_path(identity)?;
     let identity = DeviceIdentity::load_private(&path)
         .with_context(|| format!("failed to load private identity at {}", path.display()))?;
@@ -1075,7 +1080,29 @@ fn run_resume(options: ResumeOptions) -> Result<()> {
         Some(&options.repository),
         Some(&worktree),
         options.force_native,
-    )?;
+    );
+    let restored = match restored {
+        Ok(restored) => restored,
+        Err(restore_error) => {
+            let release = store
+                .release_lease(
+                    &checkpoint.public.portable_session_id,
+                    &identity.device_id(),
+                )
+                .and_then(|lease| {
+                    if let Some(remote) = options.remote.as_deref() {
+                        store.push_lease(remote, &checkpoint.public.portable_session_id)?;
+                    }
+                    Ok(lease)
+                });
+            return match release {
+                Ok(_) => Err(restore_error.context("restore failed; acquired lease was released")),
+                Err(release_error) => Err(restore_error.context(format!(
+                    "restore failed and acquired lease rollback also failed: {release_error}"
+                ))),
+            };
+        }
+    };
     if !options.no_launch {
         launch_native(options.provider, &restored, Some(&worktree))?;
     }
