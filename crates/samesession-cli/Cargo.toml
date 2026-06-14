@@ -26,6 +26,7 @@ samesession-capsule = { version = "0.1.0", path = "../samesession-capsule" }
 samesession-config = { version = "0.1.0", path = "../samesession-config" }
 samesession-core = { version = "0.1.0", path = "../samesession-core" }
 samesession-git = { version = "0.1.0", path = "../samesession-git" }
+samesession-lock = { version = "0.1.0", path = "../samesession-lock" }
 samesession-workspace = { version = "0.1.0", path = "../samesession-workspace" }
 tempfile.workspace = true
 

@@ -1,0 +1,21 @@
+[package]
+name = "samesession-lock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Cross-process operation locks for SameSession"
+keywords = ["ai", "agents", "session", "migration"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+fs2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -46,6 +46,8 @@ pub enum CapsuleError {
     UnsupportedSchema(String),
     #[error("artifact hash mismatch for {0}")]
     HashMismatch(PathBuf),
+    #[error("artifact changed while checkpointing: {0}")]
+    ArtifactChanged(PathBuf),
     #[error("restore destination already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("checkpoint output already exists: {0}")]
@@ -250,6 +252,7 @@ pub fn create_encrypted_with_source(
     if let Some(source) = source {
         append_file(&mut tar, Path::new("source/commits.bundle"), source.path)?;
     }
+    verify_capture_stable(&pending, &capsule, source)?;
     let zstd_writer = tar.into_inner()?;
     let age_writer = zstd_writer.finish()?;
     age_writer.finish()?;
@@ -257,6 +260,24 @@ pub fn create_encrypted_with_source(
         .persist_noclobber(output)
         .map_err(|error| error.error)?;
     Ok(capsule)
+}
+
+fn verify_capture_stable(
+    pending: &[PendingArtifact],
+    capsule: &NativeCapsule,
+    source: Option<SourceBundle<'_>>,
+) -> Result<(), CapsuleError> {
+    for (pending, artifact) in pending.iter().zip(&capsule.artifacts) {
+        if hash_path(&pending.source)? != artifact.sha256 {
+            return Err(CapsuleError::ArtifactChanged(pending.source.clone()));
+        }
+    }
+    if let Some(source) = source {
+        if hash_path(source.path)? != source.snapshot.bundle_sha256 {
+            return Err(CapsuleError::ArtifactChanged(source.path.to_path_buf()));
+        }
+    }
+    Ok(())
 }
 
 /// Decrypts, verifies, and installs a native session capsule.

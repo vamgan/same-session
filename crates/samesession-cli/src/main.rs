@@ -14,6 +14,7 @@ use samesession_capsule::{
 use samesession_config::{ProjectConfig, create_project, load_project};
 use samesession_core::{NativeCapsule, NativeSession, SessionAdapter};
 use samesession_git::{GitStore, StoredLease};
+use samesession_lock::OperationLock;
 use samesession_workspace::{capture_source, restore_source};
 
 #[derive(Debug, Parser)]
@@ -377,6 +378,34 @@ fn resolve_push<'a>(
     })
 }
 
+fn repository_lock(repository: Option<&Path>) -> Result<Option<OperationLock>> {
+    repository
+        .map(|repository| {
+            let output = ProcessCommand::new("git")
+                .current_dir(repository)
+                .args(["rev-parse", "--git-path", "samesession-operation.lock"])
+                .output()
+                .context("failed to resolve repository lock path")?;
+            if !output.status.success() {
+                bail!("failed to resolve repository lock path");
+            }
+            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let path = if path.is_absolute() {
+                path
+            } else {
+                repository.join(path)
+            };
+            Ok(OperationLock::acquire(&path)?)
+        })
+        .transpose()
+}
+
+fn adapter_lock(adapter: &dyn SessionAdapter) -> Result<OperationLock> {
+    Ok(OperationLock::acquire(
+        &adapter.home().join(".samesession-operation.lock"),
+    )?)
+}
+
 fn discover(provider: Option<ProviderArg>) -> Result<Vec<NativeSession>> {
     let mut sessions = Vec::new();
     for adapter in adapters(provider) {
@@ -414,6 +443,7 @@ fn run_init(
     auto_push: bool,
     json: bool,
 ) -> Result<()> {
+    let _repository_lock = repository_lock(Some(repository))?;
     GitStore::open(repository).context("repository is not a usable Git checkpoint store")?;
     let identity_path = identity_path(identity)?;
     let identity = if identity_path.exists() {
@@ -539,7 +569,9 @@ fn run_checkpoint(options: CheckpointOptions) -> Result<()> {
     let config = project_config(options.repository.as_deref())?;
     let recipients = resolve_recipients(&options.recipient, config.as_ref())?;
     let push = resolve_push(options.push.as_deref(), config.as_ref());
+    let _repository_lock = repository_lock(options.repository.as_deref())?;
     let adapter = adapter(options.provider);
+    let _adapter_lock = adapter_lock(adapter.as_ref())?;
     let session = adapter.inspect(&options.id).with_context(|| {
         format!(
             "failed to inspect {} session {}",
@@ -647,7 +679,9 @@ fn restore_capsule(
     let path = identity_path(identity)?;
     let identity = DeviceIdentity::load_private(&path)
         .with_context(|| format!("failed to load private identity at {}", path.display()))?;
+    let _repository_lock = repository_lock(repository)?;
     let adapter = adapter(provider);
+    let _adapter_lock = adapter_lock(adapter.as_ref())?;
     let temporary = tempfile::tempdir().context("failed to create restore staging directory")?;
     let source_bundle = repository.map(|_| temporary.path().join("commits.bundle"));
     let capsule_path = repository.map_or_else(
@@ -761,6 +795,7 @@ fn run_move(options: MoveOptions) -> Result<()> {
     let config = project_config(Some(&options.repository))?;
     let recipients = resolve_recipients(&options.recipient, config.as_ref())?;
     let push = resolve_push(options.push.as_deref(), config.as_ref());
+    let _repository_lock = repository_lock(Some(&options.repository))?;
     let identity_path = identity_path(options.identity)?;
     let identity = DeviceIdentity::load_private(&identity_path).with_context(|| {
         format!(
@@ -769,6 +804,7 @@ fn run_move(options: MoveOptions) -> Result<()> {
         )
     })?;
     let adapter = adapter(options.provider);
+    let _adapter_lock = adapter_lock(adapter.as_ref())?;
     let session = adapter.inspect(&options.id).with_context(|| {
         format!(
             "failed to inspect {} session {}",
