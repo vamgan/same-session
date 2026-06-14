@@ -32,7 +32,7 @@ Review a test migration before relying on SameSession for important work.
 
 ## Install From Source
 
-Requires Git and Rust 1.85 or newer.
+Requires Git and Rust 1.88 or newer.
 
 ```bash
 git clone https://github.com/vamgan/same-session.git
