@@ -697,11 +697,15 @@ fn verify_and_install(
         }
     }
     fs::create_dir_all(destination_home)?;
+    let mut moves = Vec::new();
     for artifact in &capsule.artifacts {
         let destination = destination_home.join(&artifact.install_path);
         reject_symlink_ancestors(destination_home, &artifact.install_path)?;
         if destination.exists() {
             return Err(CapsuleError::DestinationExists(destination));
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
         }
     }
     for (index, artifact) in capsule.artifacts.iter().enumerate() {
@@ -710,14 +714,13 @@ fn verify_and_install(
             .join(index.to_string())
             .join("content");
         let destination = destination_home.join(&artifact.install_path);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
+        if let Err(error) = fs::rename(&source, &destination) {
+            for (installed_source, installed_destination) in moves.iter().rev() {
+                let _ = fs::rename(installed_destination, installed_source);
+            }
+            return Err(error.into());
         }
-        if source.is_dir() {
-            copy_tree(&source, &destination)?;
-        } else {
-            fs::copy(&source, &destination)?;
-        }
+        moves.push((source, destination));
     }
     Ok(())
 }
@@ -736,33 +739,6 @@ fn reject_symlink_ancestors(root: &Path, relative: &Path) -> Result<(), CapsuleE
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), CapsuleError> {
-    for entry in WalkDir::new(source).follow_links(false) {
-        let entry = entry?;
-        let relative = entry
-            .path()
-            .strip_prefix(source)
-            .expect("walk entries are rooted under source");
-        if relative.as_os_str().is_empty() {
-            fs::create_dir_all(destination)?;
-            continue;
-        }
-        validate_relative(relative)?;
-        let target = destination.join(relative);
-        if entry.file_type().is_dir() {
-            fs::create_dir_all(target)?;
-        } else if entry.file_type().is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(entry.path(), target)?;
-        } else {
-            return Err(CapsuleError::UnsupportedEntry(entry.path().to_path_buf()));
         }
     }
     Ok(())
