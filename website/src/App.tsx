@@ -7,6 +7,7 @@ import {
   Key,
   LockKey,
   TerminalWindow,
+  UsersThree,
 } from "@phosphor-icons/react";
 import { motion, useReducedMotion, useScroll, useSpring, useTransform } from "motion/react";
 import { useRef, useState } from "react";
@@ -145,7 +146,7 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.12, duration: 0.7 }}
             >
-              Continue native Codex and Claude Code sessions on another machine, with the exact workspace state intact.
+              Continue native Codex and Claude Code sessions on another machine or hand them to an authorized teammate, with the exact workspace state intact.
             </motion.p>
             <motion.div
               className="hero-actions"
@@ -163,7 +164,7 @@ function App() {
         <section className="proof-rail">
           <div className="shell proof-inner">
             <span>WHAT SURVIVES THE MOVE</span>
-            {["Native transcript bytes", "Session identity", "Local commits", "Staged edits", "Untracked files"].map((item) => (
+            {["Native transcript", "Session identity", "Local commits", "Dirty workspace", "Teammate handoff"].map((item) => (
               <strong key={item}><Check />{item}</strong>
             ))}
           </div>
@@ -218,6 +219,38 @@ function App() {
           </Reveal>
         </section>
 
+        <section className="handoff shell">
+          <Reveal className="handoff-copy">
+            <UsersThree />
+            <p className="signal">TEAMMATE HANDOFF</p>
+            <h2>Pass the active work.<br />Not a summary.</h2>
+            <p>
+              Encrypt the capsule to a teammate's public recipient so they can resume the native
+              session and exact workspace on their machine.
+            </p>
+          </Reveal>
+          <Reveal className="handoff-boundary">
+            <div className="handoff-person">
+              <span>FROM</span>
+              <strong>you@local</strong>
+              <small>active session + workspace</small>
+            </div>
+            <div className="handoff-route">
+              <span>explicit recipient</span>
+              <ArrowRight />
+            </div>
+            <div className="handoff-person">
+              <span>TO</span>
+              <strong>teammate@remote</strong>
+              <small>independent auth + approvals</small>
+            </div>
+            <p>
+              The teammate must be enrolled as an encryption recipient and have access to the Git
+              remote. Credentials and prior approvals are never transferred.
+            </p>
+          </Reveal>
+        </section>
+
         <section className="security shell" id="security">
           <Reveal className="security-main">
             <LockKey />
@@ -229,9 +262,9 @@ function App() {
           <div className="security-rules">
             {[
               ["CAPSULE", "Age-encrypted to explicit recipients"],
+              ["TEAMMATE", "Recipient enrolls and authenticates independently"],
               ["SOURCE", "Temporary index leaves HEAD untouched"],
               ["DESTINATION", "Restored into an isolated worktree"],
-              ["OWNERSHIP", "Advisory leases reduce split-brain resumes"],
             ].map(([label, value]) => (
               <Reveal className="rule" key={label}><span>{label}</span><strong>{value}</strong><Check /></Reveal>
             ))}

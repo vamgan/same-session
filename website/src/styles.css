@@ -94,6 +94,18 @@ h1 span { color: var(--accent); }
 .command-link { min-height: 70px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; color: #626a61; font: 9px "Geist Mono"; }
 .command-link span { height: 1px; background: var(--line); }
 .command-link em { font-style: normal; }
+.handoff { padding: 80px 0 180px; display: grid; grid-template-columns: .8fr 1.2fr; gap: 100px; align-items: center; }
+.handoff-copy > svg { width: 42px; height: 42px; margin-bottom: 54px; color: var(--accent); }
+.handoff-copy h2 { margin: 24px 0 28px; font-size: clamp(3.5rem, 5.2vw, 6.3rem); line-height: .92; letter-spacing: -.07em; font-weight: 560; }
+.handoff-copy > p:last-child { max-width: 530px; color: var(--muted); font-size: 1.06rem; line-height: 1.6; }
+.handoff-boundary { padding: 28px; display: grid; grid-template-columns: 1fr .65fr 1fr; align-items: center; gap: 18px; border: 1px solid rgba(185,255,102,.3); border-radius: var(--radius); background: radial-gradient(circle at 50% 38%, rgba(185,255,102,.09), transparent 34%), var(--panel); }
+.handoff-person { min-height: 190px; padding: 20px; display: flex; flex-direction: column; justify-content: center; border: 1px solid var(--line); border-radius: 9px; }
+.handoff-person span, .handoff-route span { color: #747c73; font: 9px "Geist Mono"; }
+.handoff-person strong { margin: 14px 0 8px; color: #e6eae4; font: 13px "Geist Mono"; }
+.handoff-person small { color: var(--muted); font-size: 11px; }
+.handoff-route { display: grid; place-items: center; gap: 12px; text-align: center; }
+.handoff-route svg { width: 26px; color: var(--accent); }
+.handoff-boundary > p { grid-column: 1 / -1; margin: 10px 0 0; padding-top: 20px; border-top: 1px solid var(--line); color: #8b938a; font-size: 12px; line-height: 1.6; }
 .security { padding: 90px 0 170px; display: grid; grid-template-columns: 1fr 1fr; gap: 100px; }
 .security-main > svg { width: 42px; height: 42px; margin-bottom: 60px; color: var(--accent); }
 .security-main h2 { font-size: clamp(3.5rem, 5.2vw, 6.3rem); }
@@ -116,7 +128,7 @@ h1 span { color: var(--accent); }
   .protocol-grid { grid-template-columns: repeat(2, 1fr); }
   .protocol-step:nth-child(2) { border-right: 0; }
   .protocol-step:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
-  .commands, .security { grid-template-columns: 1fr; gap: 70px; }
+  .commands, .handoff, .security { grid-template-columns: 1fr; gap: 70px; }
 }
 @media (max-width: 650px) {
   .shell { width: min(100% - 28px, 1480px); }
@@ -148,6 +160,11 @@ h1 span { color: var(--accent); }
   .copy-command { min-height: 104px; align-items: flex-start; flex-direction: column; justify-content: center; }
   .copy-command code { overflow-wrap: anywhere; }
   .command-link em { text-align: center; }
+  .handoff { padding: 20px 0 120px; }
+  .handoff-boundary { padding: 14px; grid-template-columns: 1fr; }
+  .handoff-person { min-height: 150px; }
+  .handoff-route { min-height: 70px; }
+  .handoff-route svg { transform: rotate(90deg); }
   .security { padding-bottom: 120px; }
   .rule { grid-template-columns: 80px 1fr 18px; gap: 10px; }
   .footer { padding: 28px 0; grid-template-columns: 1fr; gap: 14px; }

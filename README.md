@@ -1,11 +1,12 @@
 # SameSession
 
-**Same session. Different machine.**
+**Same session. Different machine or teammate.**
 
 SameSession moves a native Codex CLI or Claude Code session to another machine.
-It preserves the provider-owned session ID, native transcript bytes, local Git
-commits, and dirty workspace state. It does not convert sessions between
-providers or generate a semantic handoff.
+It can also hand the active session to an authorized teammate. It preserves the
+provider-owned session ID, native transcript bytes, local Git commits, and dirty
+workspace state. It does not convert sessions between providers or generate a
+semantic handoff.
 
 ```text
 Mac                                        Cloud desktop
@@ -89,6 +90,26 @@ lease, and launches the provider CLI from that worktree. Use `--no-launch` to
 restore without launching or `--into <path>` to choose the worktree path.
 
 For Claude Code, replace `--provider codex` with `--provider claude`.
+
+## Hand Off To A Teammate
+
+Enroll the teammate's public age recipient and ensure they can access the Git
+remote. The next moved capsule can then be decrypted and resumed by that
+teammate:
+
+```bash
+samesession init \
+  --repository . \
+  --recipient <teammate-age-recipient> \
+  --auto-push
+
+samesession move current --provider codex --repository .
+```
+
+The teammate clones or fetches the shared remote and runs `samesession resume
+latest`. They receive the native session and captured workspace, but must
+authenticate with the provider and approve actions independently. Credentials,
+machine trust, and previous approvals are never transferred.
 
 ## Standalone Checkpoints
 

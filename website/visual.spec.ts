@@ -16,6 +16,7 @@ for (const viewport of [
     for (const [name, selector] of [
       ["protocol", "#protocol"],
       ["commands", ".commands"],
+      ["handoff", ".handoff"],
       ["security", "#security"],
       ["final", ".final"],
     ]) {
